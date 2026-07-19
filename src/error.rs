@@ -1,4 +1,7 @@
 //! Error types returned by the AnchorNet contract.
+//!
+//! See the [contract error reference](../docs/ERRORS.md) for the stable
+//! error codes, their conditions, and their originating public entrypoints.
 
 use soroban_sdk::contracterror;
 
@@ -6,6 +9,9 @@ use soroban_sdk::contracterror;
 ///
 /// Each variant maps to a stable `u32` code so that off-chain clients can
 /// match on the error regardless of SDK version.
+///
+/// See the [contract error reference](../docs/ERRORS.md) for the condition
+/// and public entrypoints associated with every variant.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]

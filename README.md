@@ -32,6 +32,7 @@ cargo test
 
 - `src/lib.rs` – contract entrypoint and public interface
 - `src/error.rs` – error codes returned to clients
+- [`docs/ERRORS.md`](docs/ERRORS.md) – stable error-code reference and originating entrypoints
 - `src/types.rs` – on-chain data types (`Pool`)
 - `src/storage.rs` – storage keys and TTL-aware accessors
 - `src/events.rs` – event publishing helpers
