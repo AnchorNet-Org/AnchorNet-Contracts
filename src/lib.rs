@@ -140,6 +140,13 @@ impl AnchornetContract {
         storage::has_operator(&env) && storage::get_operator(&env) == address
     }
 
+    /// Returns `true` if any operator has been appointed, without
+    /// revealing the operator's address. Cheaper than [`operator`](Self::operator)
+    /// for clients that only need to know whether one exists.
+    pub fn has_operator(env: Env) -> bool {
+        storage::has_operator(&env)
+    }
+
     /// Pauses the contract, blocking liquidity and settlement mutations.
     /// Requires authorization from `caller`, who must be either the admin or
     /// the appointed [`operator`](Self::operator).
@@ -388,7 +395,28 @@ impl AnchornetContract {
         if !storage::is_anchor(&env, &anchor) {
             return Err(Error::AnchorNotRegistered);
         }
+        // Reject if the anchor still holds any liquidity.
+        let assets = storage::get_asset_list(&env);
+        let mut i = 0;
+        while i < assets.len() {
+            let asset = assets.get(i).unwrap();
+            if storage::get_balance(&env, &anchor, &asset) != 0 {
+                return Err(Error::AnchorHasBalance);
+            }
+            i += 1;
+        }
+        // Reject if the anchor has any pending settlement.
+        let settlements = storage::list_settlements_by_anchor(&env, anchor.clone(), 0, u32::MAX);
+        let mut j = 0;
+        while j < settlements.len() {
+            if settlements.get(j).unwrap().status == SettlementStatus::Pending {
+                return Err(Error::AnchorHasOpenSettlement);
+            }
+            j += 1;
+        }
         storage::set_anchor_flag(&env, &anchor, false);
+        // Clear any fee waiver so a re-registered anchor starts clean.
+        storage::clear_fee_waiver(&env, &anchor);
         events::anchor_removed(&env, &anchor);
         Ok(())
     }

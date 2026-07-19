@@ -52,4 +52,8 @@ pub enum Error {
     AboveMaxSettlementAmount = 19,
     /// The same asset appeared more than once in a batch operation.
     DuplicateAssetInBatch = 20,
+    /// The anchor still holds liquidity and cannot be deregistered.
+    AnchorHasBalance = 21,
+    /// The anchor has a pending settlement and cannot be deregistered.
+    AnchorHasOpenSettlement = 22,
 }

@@ -470,6 +470,9 @@ fn test_deregister_anchor_blocks_settlement() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
+    // Withdraw all liquidity so the anchor can be deregistered (a registered
+    // anchor must hold no balance before deregistration).
+    client.withdraw_all_liquidity(&anchor, &asset);
     client.deregister_anchor(&anchor);
     assert!(!client.is_anchor(&anchor));
 
@@ -495,6 +498,43 @@ fn test_deregister_unknown_anchor_fails() {
         .unwrap()
         .unwrap();
     assert_eq!(err, Error::AnchorNotRegistered);
+}
+
+#[test]
+fn test_deregister_clears_fee_waiver() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.set_fee_waiver(&anchor, &true);
+    assert!(client.is_fee_waived(&anchor));
+    client.deregister_anchor(&anchor);
+    // Re-registering the same address must not inherit the stale waiver.
+    client.register_anchor(&anchor);
+    assert!(!client.is_fee_waived(&anchor));
+}
+
+#[test]
+fn test_deregister_rejects_nonzero_balance() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let err = client.try_deregister_anchor(&anchor).err().unwrap().unwrap();
+    assert_eq!(err, Error::AnchorHasBalance);
+}
+
+#[test]
+fn test_deregister_rejects_open_settlement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    // Withdraw the balance so the balance check passes, isolating the
+    // open-settlement rejection.
+    client.withdraw_all_liquidity(&anchor, &asset);
+    let err = client.try_deregister_anchor(&anchor).err().unwrap().unwrap();
+    assert_eq!(err, Error::AnchorHasOpenSettlement);
 }
 
 #[test]

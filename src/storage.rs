@@ -317,6 +317,36 @@ pub fn set_fee_waiver(env: &Env, anchor: &Address, waived: bool) {
     extend(env, &key);
 }
 
+/// Clears any fee waiver for `anchor`. Called on deregistration so a
+/// re-registered anchor does not inherit a stale waiver from its prior life.
+pub fn clear_fee_waiver(env: &Env, anchor: &Address) {
+    let key = DataKey::FeeWaiver(anchor.clone());
+    env.storage().persistent().remove(&key);
+}
+
+/// Returns up to `limit` settlements opened by `anchor`, starting at id
+/// `start` (inclusive). Ids are assigned sequentially from 1; missing or
+/// non-matching ids are skipped without counting toward `limit`.
+pub fn list_settlements_by_anchor(
+    env: &Env,
+    anchor: Address,
+    start: u64,
+    limit: u32,
+) -> Vec<Settlement> {
+    let mut out = Vec::new(env);
+    let count = get_settlement_count(env);
+    let mut id = if start == 0 { 1 } else { start };
+    while id <= count && (out.len() as u32) < limit {
+        if let Some(settlement) = get_settlement(env, id) {
+            if settlement.anchor == anchor {
+                out.push_back(settlement);
+            }
+        }
+        id += 1;
+    }
+    out
+}
+
 /// Reads the settlement expiry window in ledgers (zero if never configured,
 /// meaning settlements never expire).
 pub fn get_settlement_expiry_ledgers(env: &Env) -> u32 {
