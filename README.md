@@ -140,7 +140,7 @@ setting.
 - `("anchor", anchor)` / `("deanchor", anchor)` – anchor registered / removed
 - `("provide", provider, asset)` – liquidity provided
 - `("withdraw", provider, asset)` – liquidity withdrawn
-- `("paused",)` – paused flag changed
+- `("paused",)` – paused flag changed; data is `true` when pausing, `false` when unpausing
 - `("fee",)` – protocol fee changed
 - `("waiver", anchor)` – anchor fee waiver granted or revoked
 - `("settle", anchor, asset)` – settlement opened

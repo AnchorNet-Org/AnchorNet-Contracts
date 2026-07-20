@@ -301,6 +301,58 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
+fn test_pause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+
+    // `events().all()` reflects only the most recent top-level invocation,
+    // so calling pause in isolation lets us assert its exact event output.
+    client.pause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                true.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_unpause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    client.pause(&admin);
+
+    // Call unpause in isolation so events().all() reflects only unpause.
+    client.unpause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                false.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn test_paused_blocks_provide_and_withdraw() {
     let env = Env::default();
     let (client, admin, anchor, asset) = funded(&env, 1_000);
