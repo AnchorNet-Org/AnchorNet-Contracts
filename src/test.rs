@@ -1941,6 +1941,64 @@ fn test_cancel_expired_settlement_rejects_double_reclaim() {
 }
 
 #[test]
+fn test_cancel_settlement_and_expired_race_cancel_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_settlement (anchor-authorized) wins the race.
+    client.cancel_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Cancelled);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_expired_settlement sees Cancelled != Pending and rejects.
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_cancel_expired_and_settlement_race_expired_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_expired_settlement (permissionless) wins the race.
+    client.cancel_expired_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_settlement sees Expired != Pending and rejects.
+    let err = client
+        .try_cancel_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
 fn test_max_settlement_amount_disabled_by_default() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
