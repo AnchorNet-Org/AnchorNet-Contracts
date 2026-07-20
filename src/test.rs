@@ -2,7 +2,7 @@ use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus}
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _},
+    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     vec, Address, Env, IntoVal, Symbol,
 };
 
@@ -1635,6 +1635,82 @@ fn test_replacing_operator_revokes_prior_operator() {
 
     let err = client.try_pause(&first).err().unwrap().unwrap();
     assert_eq!(err, Error::NotAuthorized);
+}
+
+/// Returns a client whose next invocation carries exactly one authorization:
+/// `caller` signing `fn_name(caller)` on the contract. The caller genuinely
+/// signs for the call, so any rejection comes from the contract's own role
+/// check, not from a missing signature.
+macro_rules! signed_as {
+    ($env:expr, $client:expr, $caller:expr, $fn_name:literal) => {
+        $client.mock_auths(&[MockAuth {
+            address: &$caller,
+            invoke: &MockAuthInvoke {
+                contract: &$client.address,
+                fn_name: $fn_name,
+                args: ($caller.clone(),).into_val(&$env),
+                sub_invokes: &[],
+            },
+        }])
+    };
+}
+
+#[test]
+fn test_superseded_operator_fully_loses_authority() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let old_operator = Address::generate(&env);
+    let new_operator = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.set_operator(&old_operator);
+    // While appointed, the old operator's authority works.
+    client.pause(&old_operator);
+    client.unpause(&old_operator);
+
+    // Replacing the operator must revoke the old one in the same call: reads
+    // reflect only the current operator, never the stale prior one.
+    client.set_operator(&new_operator);
+    assert_eq!(client.operator(), new_operator);
+    assert!(client.is_operator(&new_operator));
+    assert!(!client.is_operator(&old_operator));
+
+    // From here on, each call carries only the caller's own signed auth
+    // (no blanket mocking), so the old operator is presenting a *valid*
+    // signature and must be turned away by the contract's role check alone.
+    let err = signed_as!(env, client, old_operator, "pause")
+        .try_pause(&old_operator)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    assert!(!client.is_paused());
+
+    // The new operator's own signature suffices to pause.
+    signed_as!(env, client, new_operator, "pause").pause(&new_operator);
+    assert!(client.is_paused());
+
+    // The old operator cannot unpause either — no residual authority on any
+    // of the operator-gated entry points.
+    let err = signed_as!(env, client, old_operator, "unpause")
+        .try_unpause(&old_operator)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    assert!(client.is_paused());
+
+    let err = signed_as!(env, client, old_operator, "extend_instance_ttl")
+        .try_extend_instance_ttl(&old_operator)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+
+    // The new operator remains fully authorized.
+    signed_as!(env, client, new_operator, "unpause").unpause(&new_operator);
+    assert!(!client.is_paused());
 }
 
 #[test]
