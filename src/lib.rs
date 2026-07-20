@@ -996,6 +996,28 @@ impl AnchornetContract {
         }
         total
     }
+
+    /// Returns the sum of `amount` across every settlement regardless of
+    /// lifecycle status — the single-call, cross-status counterpart of
+    /// [`total_settled_amount`](Self::total_settled_amount), mirroring how
+    /// [`total_liquidity_all`](Self::total_liquidity_all) rolls up
+    /// [`total_liquidity`](Self::total_liquidity). Every settlement is in
+    /// exactly one [`SettlementStatus`], so this equals summing the
+    /// per-status read over all four variants, in one scan instead of four.
+    /// Like the per-status read, the result mixes units across assets and is
+    /// meant for off-chain volume dashboards rather than accounting.
+    pub fn total_settled_amount_all(env: Env) -> i128 {
+        let count = storage::get_settlement_count(&env);
+        let mut total: i128 = 0;
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                total += settlement.amount;
+            }
+            id += 1;
+        }
+        total
+    }
 }
 
 impl AnchornetContract {

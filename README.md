@@ -119,6 +119,7 @@ state.
 | `list_settlements_by_status(status, start, limit)` | – | Page through settlements in a given lifecycle state |
 | `settlement_count_by_status(status)` | – | Count every settlement in a given lifecycle state (no pagination) |
 | `total_settled_amount(status)` | – | Sum settled `amount` across every settlement in a given lifecycle state |
+| `total_settled_amount_all()` | – | Sum settled `amount` across every settlement regardless of lifecycle state |
 | `contract_info()` | – | One-call snapshot of version, paused flag, fee, and anchor/asset/settlement counts |
 
 `cancel_expired_settlement` requires no authorization: it only ever returns
