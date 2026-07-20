@@ -1998,6 +1998,57 @@ fn test_open_settlement_allows_amount_at_cap() {
 }
 
 #[test]
+fn test_max_settlement_amount_zero_sentinel_disables_cap() {
+    // Regression test for the "0 disables the cap" sentinel: a cap of zero
+    // must mean "no cap at all", never "cap of zero, reject everything".
+    // The sharpest inversion risk is resetting an *active* cap back to 0,
+    // so exercise exactly that transition.
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Active cap: an over-cap settlement is rejected.
+    client.set_max_settlement_amount(&asset, &500);
+    let err = client
+        .try_open_settlement(&anchor, &asset, &600)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::AboveMaxSettlementAmount);
+
+    // Reset to the 0 sentinel: the cap is disabled, and a settlement far
+    // above the former cap — the entire pool — succeeds.
+    client.set_max_settlement_amount(&asset, &0);
+    assert_eq!(client.max_settlement_amount(&asset), 0);
+    client.open_settlement(&anchor, &asset, &1_000);
+    assert_eq!(client.total_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_min_liquidity_zero_sentinel_disables_floor() {
+    // Companion regression test for set_min_liquidity's identical 0
+    // sentinel: a floor of zero must mean "no floor", never "pool may not
+    // be touched". Exercise the same active-then-reset transition.
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Active floor: a withdrawal that would sink the pool below it fails.
+    client.set_min_liquidity(&asset, &700);
+    let err = client
+        .try_withdraw_liquidity(&anchor, &asset, &400)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::BelowMinLiquidity);
+
+    // Reset to the 0 sentinel: the floor is disabled and the pool can be
+    // drained to exactly zero.
+    client.set_min_liquidity(&asset, &0);
+    assert_eq!(client.min_liquidity(&asset), 0);
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    assert_eq!(client.total_liquidity(&asset), 0);
+}
+
+#[test]
 fn test_max_settlement_amount_cap_is_per_asset() {
     let env = Env::default();
     env.mock_all_auths();
