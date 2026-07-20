@@ -1,4 +1,8 @@
 /target/
 **/*.rs.bk
-.env
+temp_auto_push.bat
 .DS_Store
+.gitignore
+branch_structure.json
+config.bat
+node_modules
