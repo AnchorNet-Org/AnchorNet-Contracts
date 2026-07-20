@@ -1,7 +1,8 @@
 use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus};
+use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
+    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _},
     vec, Address, Env, IntoVal, Symbol,
 };
 
@@ -23,6 +24,19 @@ fn funded(env: &Env, liquidity: i128) -> (AnchornetContractClient<'_>, Address, 
     client.register_anchor(&anchor);
     client.provide_liquidity(&anchor, &asset, &liquidity);
     (client, admin, anchor, asset)
+}
+
+fn fee_amount_strategy() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        3 => 1i128..=i128::MAX,
+        1 => (i128::MAX - 100_000)..=i128::MAX,
+    ]
+}
+
+fn fee_test_env() -> Env {
+    Env::new_with_config(EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    })
 }
 
 #[test]
@@ -510,6 +524,64 @@ fn test_quote_fee_preview() {
 
     let err = client.try_quote_fee(&asset, &0).err().unwrap().unwrap();
     assert_eq!(err, Error::InvalidAmount);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_quote_fee_is_monotonic_and_bounded_with_global_fee(
+        first in fee_amount_strategy(),
+        second in fee_amount_strategy(),
+        bps in 0u32..=1_000,
+    ) {
+        let env = fee_test_env();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let asset = symbol_short!("USDC");
+        client.initialize(&admin);
+        client.set_fee(&bps);
+
+        let (lower_amount, upper_amount) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let lower_fee = client.quote_fee(&asset, &lower_amount);
+        let upper_fee = client.quote_fee(&asset, &upper_amount);
+
+        prop_assert!(lower_fee >= 0 && lower_fee <= lower_amount);
+        prop_assert!(upper_fee >= 0 && upper_fee <= upper_amount);
+        prop_assert!(lower_fee <= upper_fee);
+    }
+
+    #[test]
+    fn prop_quote_fee_is_monotonic_and_bounded_with_asset_override(
+        first in fee_amount_strategy(),
+        second in fee_amount_strategy(),
+        global_bps in 0u32..=1_000,
+        override_bps in 0u32..=1_000,
+    ) {
+        let env = fee_test_env();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let asset = symbol_short!("USDC");
+        client.initialize(&admin);
+        client.set_fee(&global_bps);
+        client.set_asset_fee(&asset, &override_bps);
+
+        let (lower_amount, upper_amount) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let lower_fee = client.quote_fee(&asset, &lower_amount);
+        let upper_fee = client.quote_fee(&asset, &upper_amount);
+
+        prop_assert!(lower_fee >= 0 && lower_fee <= lower_amount);
+        prop_assert!(upper_fee >= 0 && upper_fee <= upper_amount);
+        prop_assert!(lower_fee <= upper_fee);
+    }
 }
 
 #[test]
@@ -1032,30 +1104,36 @@ fn test_provide_liquidity_overflow_panics() {
 }
 
 #[test]
-#[should_panic]
-fn test_quote_fee_overflow_panics() {
-    let env = Env::default();
+fn test_quote_fee_handles_max_amount_at_max_fee() {
+    let env = fee_test_env();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     let asset = symbol_short!("USDC");
 
     client.initialize(&admin);
-    client.set_fee(&100); // 1%
-                          // `amount * fee_bps` overflows i128 long before the division by the bps
-                          // denominator brings it back into range.
-    client.quote_fee(&asset, &i128::MAX);
+    let max_fee_bps = client.max_fee_bps();
+    client.set_fee(&max_fee_bps);
+
+    assert_eq!(client.quote_fee(&asset, &i128::MAX), i128::MAX / 10);
+    assert_eq!(
+        client.quote_fee(&asset, &(i128::MAX - 1)),
+        (i128::MAX - 1) / 10
+    );
+
+    client.set_fee(&0);
+    client.set_asset_fee(&asset, &max_fee_bps);
+    assert_eq!(client.quote_fee(&asset, &i128::MAX), i128::MAX / 10);
 }
 
 #[test]
-#[should_panic]
-fn test_open_settlement_fee_overflow_panics() {
-    let env = Env::default();
+fn test_open_settlement_handles_max_amount_at_max_fee() {
+    let env = fee_test_env();
     let (client, _admin, anchor, asset) = funded(&env, i128::MAX);
-    client.set_fee(&100); // 1%
+    client.set_fee(&client.max_fee_bps());
 
-    // Reserving close to `i128::MAX` liquidity overflows while computing the
-    // settlement fee (`amount * fee_bps`).
-    client.open_settlement(&anchor, &asset, &i128::MAX);
+    let id = client.open_settlement(&anchor, &asset, &i128::MAX);
+
+    assert_eq!(client.settlement(&id).fee, i128::MAX / 10);
 }
 
 #[test]

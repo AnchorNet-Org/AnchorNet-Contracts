@@ -200,12 +200,16 @@ impl AnchornetContract {
 
     /// Previews the protocol fee charged for settling `amount` of `asset` at
     /// the current fee rate (respecting any [`asset_fee`](Self::asset_fee)
-    /// override), without changing any state.
+    /// override), without changing any state. Returns [`Error::InvalidAmount`]
+    /// when `amount` is zero or negative.
     pub fn quote_fee(env: Env, asset: Symbol, amount: i128) -> Result<i128, Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(amount * (Self::effective_fee_bps(&env, &asset) as i128) / BPS_DENOMINATOR)
+        Ok(Self::calculate_fee(
+            amount,
+            Self::effective_fee_bps(&env, &asset),
+        ))
     }
 
     /// Grants or revokes a protocol fee waiver for `anchor`. While waived,
@@ -620,7 +624,7 @@ impl AnchornetContract {
         let fee = if storage::is_fee_waived(&env, &anchor) {
             0
         } else {
-            amount * (Self::effective_fee_bps(&env, &asset) as i128) / BPS_DENOMINATOR
+            Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))
         };
         let id = storage::get_settlement_count(&env) + 1;
         storage::set_settlement_count(&env, id);
@@ -1050,6 +1054,24 @@ impl AnchornetContract {
     /// per-asset override if one is configured, otherwise the global fee.
     fn effective_fee_bps(env: &Env, asset: &Symbol) -> u32 {
         storage::get_asset_fee(env, asset).unwrap_or_else(|| storage::get_fee_bps(env))
+    }
+
+    /// Calculates `floor(amount * fee_bps / 10_000)` without overflowing the
+    /// intermediate product. Callers validate that `amount` is positive and
+    /// `fee_bps` does not exceed [`MAX_FEE_BPS`].
+    fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
+        let fee_bps = i128::from(fee_bps);
+        let whole = (amount / BPS_DENOMINATOR)
+            .checked_mul(fee_bps)
+            .expect("fee calculation overflow");
+        let remainder = (amount % BPS_DENOMINATOR)
+            .checked_mul(fee_bps)
+            .expect("fee calculation overflow")
+            / BPS_DENOMINATOR;
+
+        whole
+            .checked_add(remainder)
+            .expect("fee calculation overflow")
     }
 
     /// Adds `amount` of `asset` to `provider`'s balance and the pool total,
