@@ -480,6 +480,47 @@ fn test_collect_fees_without_accrual_fails() {
 }
 
 #[test]
+fn test_collect_fees_double_invocation_never_double_collects() {
+    // Reentrancy-style regression test: collect_fees zeroes the accrued
+    // balance (its only state effect) before returning, and performs no
+    // external call of any kind — no SEP-41 token transfer is involved on
+    // this path, fees are internal accounting only — so there is no frame a
+    // reentrant call could interleave into even if Soroban's host did not
+    // already forbid contract reentrancy outright. The observable
+    // guarantee locked in here: a second invocation for the same asset in
+    // the same ledger (the env's sequence number is never advanced between
+    // calls) finds nothing to collect and errors, rather than paying the
+    // same accrual twice.
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    let id = client.open_settlement(&anchor, &asset, &500);
+    client.execute_settlement(&id);
+    assert_eq!(client.fees_accrued(&asset), 5);
+
+    // First collection pays out the full accrual and zeroes it.
+    assert_eq!(client.collect_fees(&asset), 5);
+    assert_eq!(client.fees_accrued(&asset), 0);
+
+    // Immediate second invocation: nothing left, explicit error — never a
+    // duplicate payout of the already-collected amount.
+    let err = client.try_collect_fees(&asset).err().unwrap().unwrap();
+    assert_eq!(err, Error::NoFeesToCollect);
+    assert_eq!(client.fees_accrued(&asset), 0);
+
+    // Fees accrued after a collection are a fresh balance: exactly the new
+    // amount is collectable, with no residue of the earlier accrual.
+    let id2 = client.open_settlement(&anchor, &asset, &200);
+    client.execute_settlement(&id2);
+    assert_eq!(client.fees_accrued(&asset), 2);
+    assert_eq!(client.collect_fees(&asset), 2);
+
+    // And the double-invocation guarantee holds again after re-accrual.
+    let err = client.try_collect_fees(&asset).err().unwrap().unwrap();
+    assert_eq!(err, Error::NoFeesToCollect);
+}
+
+#[test]
 fn test_deregister_anchor_blocks_settlement() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
