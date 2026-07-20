@@ -2504,3 +2504,179 @@ fn test_anchor_balances_empty_for_a_provider_with_no_liquidity() {
 
     assert_eq!(client.anchor_balances(&stranger, &0, &10).len(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Instruction-budget regression tests for the list_* pagination entrypoints.
+//
+// These guard against a future change silently making a fixed-limit page
+// read cost scale with the *total* dataset size instead of `limit`, which
+// would turn pagination into a denial-of-service vector as on-chain state
+// grows. Costs are metered with the Soroban test env's budget
+// (`env.cost_estimate().budget()`), which resets before every top-level
+// invocation, so reading it right after a call meters that call alone.
+// Metering is deterministic for a given soroban-sdk version, so these
+// thresholds are not flaky; they may need recalibrating on SDK upgrades.
+//
+// Known gap (documented rather than fixed, since the fix needs a storage
+// layout migration): `list_anchors`, `list_fee_waived_anchors` and
+// `list_assets` store their registration history as a single Vec under one
+// storage key and deserialize the whole Vec on every call, so their cost
+// grows linearly with *total* entries at roughly 1.5k instructions per
+// entry (measured on soroban-sdk 25). That slope is harmless at realistic
+// scales (10k anchors ~= 15M instructions, well under Stellar's 600M
+// per-invocation cap) but is asserted below so it cannot silently steepen.
+// The per-id settlement listers read one record per scanned id and are
+// near-constant in history size for a dense fixed-limit page.
+
+/// Page size every budget regression test reads.
+const BUDGET_PAGE_LIMIT: u32 = 5;
+/// Small and large dataset sizes compared by the tests: 20x more data must
+/// not meaningfully change (settlement listers) or only mildly change
+/// (Vec-backed registry listers) the cost of one fixed-size page.
+const BUDGET_SMALL_N: u32 = 10;
+const BUDGET_LARGE_N: u32 = 200;
+/// Generous absolute per-call ceiling for a settlement lister page at
+/// `BUDGET_LARGE_N` (measured ~305k on soroban-sdk 25).
+const SETTLEMENT_PAGE_CPU_CEILING: u64 = 1_000_000;
+/// Generous absolute per-call ceiling for a registry lister page at
+/// `BUDGET_LARGE_N` (measured ~250k-580k on soroban-sdk 25).
+const REGISTRY_PAGE_CPU_CEILING: u64 = 2_000_000;
+/// Ceiling on how much one *extra* stored registry entry may add to a
+/// page's cost (measured slope ~0.9k-1.5k instructions per entry on
+/// soroban-sdk 25 — the whole-Vec load documented above). A regression
+/// that adds so much as one storage read per entry (~2.5k+) breaches this.
+const REGISTRY_PER_ENTRY_CPU_CEILING: u64 = 2_000;
+
+/// Returns the CPU instruction cost metered for the last contract call.
+fn last_call_cpu(env: &Env) -> u64 {
+    env.cost_estimate().budget().cpu_instruction_cost()
+}
+
+/// Seeds a contract with `n` settlements (one anchor, one asset, all
+/// Pending so every filtered lister finds a dense first page) and returns
+/// the per-call CPU cost of reading one `BUDGET_PAGE_LIMIT`-sized page as
+/// `[list_settlements, by_anchor, by_asset, by_status]`.
+fn settlement_page_costs(n: u32) -> [u64; 4] {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &(n as i128));
+    for _ in 0..n {
+        client.open_settlement(&anchor, &asset, &1);
+    }
+
+    client.list_settlements(&1, &BUDGET_PAGE_LIMIT);
+    let plain = last_call_cpu(&env);
+    client.list_settlements_by_anchor(&anchor, &1, &BUDGET_PAGE_LIMIT);
+    let by_anchor = last_call_cpu(&env);
+    client.list_settlements_by_asset(&asset, &1, &BUDGET_PAGE_LIMIT);
+    let by_asset = last_call_cpu(&env);
+    client.list_settlements_by_status(&SettlementStatus::Pending, &1, &BUDGET_PAGE_LIMIT);
+    let by_status = last_call_cpu(&env);
+    [plain, by_anchor, by_asset, by_status]
+}
+
+/// Seeds a contract with `n` registered anchors (all fee-waived) and `n`
+/// funded assets, and returns the per-call CPU cost of reading one
+/// `BUDGET_PAGE_LIMIT`-sized page as
+/// `[list_anchors, list_fee_waived_anchors, list_assets]`.
+fn registry_page_costs(n: u32) -> [u64; 3] {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+    let mut anchors = std::vec::Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let anchor = Address::generate(&env);
+        client.register_anchor(&anchor);
+        client.set_fee_waiver(&anchor, &true);
+        anchors.push(anchor);
+    }
+    for i in 0..n {
+        let asset = Symbol::new(&env, &format!("A{i}"));
+        client.provide_liquidity(&anchors[0], &asset, &1);
+    }
+
+    client.list_anchors(&0, &BUDGET_PAGE_LIMIT);
+    let anchors = last_call_cpu(&env);
+    client.list_fee_waived_anchors(&0, &BUDGET_PAGE_LIMIT);
+    let fee_waived = last_call_cpu(&env);
+    client.list_assets(&0, &BUDGET_PAGE_LIMIT);
+    let assets = last_call_cpu(&env);
+    [anchors, fee_waived, assets]
+}
+
+#[test]
+fn test_settlement_listers_page_cost_constant_in_history_size() {
+    let small = settlement_page_costs(BUDGET_SMALL_N);
+    let large = settlement_page_costs(BUDGET_LARGE_N);
+    let names = [
+        "list_settlements",
+        "list_settlements_by_anchor",
+        "list_settlements_by_asset",
+        "list_settlements_by_status",
+    ];
+
+    for i in 0..names.len() {
+        // 20x the settlement history may not cost even 1.5x more for the
+        // same fixed-size page (measured drift is ~11%, from the host's
+        // storage-map bookkeeping, not from scanning). An accidental
+        // full-history scan multiplies the large-N cost several-fold and
+        // fails this immediately.
+        assert!(
+            large[i] * 2 <= small[i] * 3,
+            "{}: page cost grew from {} to {} instructions when the \
+             settlement history grew {}x — pagination cost must track \
+             `limit`, not total history size",
+            names[i],
+            small[i],
+            large[i],
+            BUDGET_LARGE_N / BUDGET_SMALL_N,
+        );
+        assert!(
+            large[i] <= SETTLEMENT_PAGE_CPU_CEILING,
+            "{}: page cost {} exceeds the {} instruction ceiling",
+            names[i],
+            large[i],
+            SETTLEMENT_PAGE_CPU_CEILING,
+        );
+    }
+}
+
+#[test]
+fn test_registry_listers_page_cost_bounded_in_registry_size() {
+    let small = registry_page_costs(BUDGET_SMALL_N);
+    let large = registry_page_costs(BUDGET_LARGE_N);
+    let names = ["list_anchors", "list_fee_waived_anchors", "list_assets"];
+    let extra_entries = (BUDGET_LARGE_N - BUDGET_SMALL_N) as u64;
+
+    for i in 0..names.len() {
+        // These listers inherently pay ~1.5k instructions per stored entry
+        // to load their backing Vec (the known gap documented above), so
+        // constant cost cannot be asserted; instead pin the per-entry
+        // slope so any regression adding real work per entry — even one
+        // storage read (~2.5k+) — breaches the ceiling.
+        assert!(
+            large[i] - small[i] <= extra_entries * REGISTRY_PER_ENTRY_CPU_CEILING,
+            "{}: page cost grew from {} to {} instructions across {} extra \
+             registry entries (> {} per entry) — expected only the flat \
+             whole-Vec load slope, not extra per-entry work",
+            names[i],
+            small[i],
+            large[i],
+            extra_entries,
+            REGISTRY_PER_ENTRY_CPU_CEILING,
+        );
+        assert!(
+            large[i] <= REGISTRY_PAGE_CPU_CEILING,
+            "{}: page cost {} exceeds the {} instruction ceiling",
+            names[i],
+            large[i],
+            REGISTRY_PAGE_CPU_CEILING,
+        );
+    }
+}
