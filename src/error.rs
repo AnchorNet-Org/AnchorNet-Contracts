@@ -12,6 +12,13 @@ use soroban_sdk::contracterror;
 ///
 /// See the [contract error reference](../docs/ERRORS.md) for the condition
 /// and public entrypoints associated with every variant.
+// Contributor note: these discriminants are part of the stable off-chain
+// contract interface (see docs/ERRORS.md). Always append new variants at
+// the end with the next sequential number. Never insert a variant in the
+// middle or renumber an existing one — that silently reassigns the meaning
+// of every later error code for clients matching on the numeric value.
+// `test_error_discriminants_are_pinned` in src/test.rs pins every variant
+// below and will fail if this invariant is violated.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
