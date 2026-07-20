@@ -151,6 +151,86 @@ setting.
 - `("minliq", asset)` – asset minimum liquidity floor changed
 - `("operator",)` – operator appointed or replaced
 
+## Storage & TTL
+
+Soroban ledger entries are rent-based: every entry has a time-to-live (TTL,
+measured in ledgers) and is **archived** — taken out of the live ledger, not
+deleted — once its TTL runs out. A transaction that touches an archived
+persistent entry fails until the entry is restored (via a
+`RestoreFootprint` operation; RPC transaction simulation returns the
+required restore preamble automatically). Restoring costs rent but never
+loses data. This section documents which storage class each entry of this
+contract uses and when its TTL is extended, grounded in the accessors in
+`src/storage.rs`.
+
+### TTL policy constants
+
+Every extension in `src/storage.rs` uses the same policy: whenever an
+access qualifies (see below) and the entry's remaining TTL is under the
+~29-day threshold (`501_120` ledgers), it is topped back up to ~30 days
+(`518_400` ledgers, at 17,280 ledgers/day). In practice this means any
+qualifying access resets the entry's clock to ~30 days.
+
+### Where each entry lives
+
+| Storage class | Entries | TTL is extended when |
+|---------------|---------|----------------------|
+| Instance | `Admin`, `PendingAdmin`, `Operator`, `Paused`, `FeeBps`, `SettlementCount`, `SettlementExpiryLedgers` | Only by `extend_instance_ttl(caller)` (admin or operator) |
+| Persistent, extended on **read and write** | `Pool(asset)`, `Settlement(id)`, `AnchorList`, `AssetList` | Any contract call that reads or writes the entry |
+| Persistent, extended on **write only** | `Anchor(address)`, `Balance(provider, asset)`, `FeeWaiver(anchor)`, `MinLiquidity(asset)`, `MaxSettlementAmount(asset)`, `AssetFee(asset)`, `FeesAccrued(asset)` | Only calls that write the entry (e.g. `provide_liquidity` rewrites `Balance`; `register_anchor` rewrites `Anchor`); reads do not extend |
+
+The contract uses no temporary storage, so nothing is ever silently
+deleted — worst case is archival plus a paid restore.
+
+### `extend_instance_ttl` vs. per-entry TTLs
+
+`extend_instance_ttl` extends exactly two ledger entries: the contract
+**instance** (which carries all instance-storage config above) and the
+deployed **Wasm code**. It does **not** touch any persistent entry — no
+`Pool`, `Settlement`, balance or registry list is extended by it. The
+reverse also holds: activity on pools and settlements never extends the
+instance. Ordinary traffic does not extend the instance implicitly, so a deployment
+needs both kinds of upkeep: call `extend_instance_ttl` at least once per
+~30-day window to keep the contract itself alive, and rely on the
+per-entry access patterns described below to keep the data live.
+
+### Operational implications for integrators
+
+- **Pools and settlements are self-renewing under traffic.** Any call that
+  reads a pool (`pool`, `total_liquidity`, `provide_liquidity`, …) or a
+  settlement record (`settlement`, any `list_settlements*` page that scans
+  it, `execute_settlement`, …) resets that entry's TTL to ~30 days. An
+  asset with no reads or writes at all for ~30 days will see its `Pool`
+  entry archived; the next transaction touching it fails until a restore
+  is submitted, after which the pool state is intact. An indexer that
+  polls every known asset (e.g. via `list_assets` + `pool`) more often
+  than monthly keeps all pools live as a side effect — but note the polling
+  must be **on-chain transactions**, not simulations, for the extension to
+  take effect.
+- **Write-only-bumped entries can archive while the contract is active.**
+  An anchor's `Anchor(address)` registration flag is only rewritten by
+  `register_anchor`/`deregister_anchor`, and a provider's `Balance` only
+  by that provider's own liquidity operations. A provider who parks
+  liquidity untouched for over ~30 days may need a restore before
+  `withdraw_liquidity` succeeds; an anchor registered once and never
+  re-registered can likewise see its flag archive even while it transacts
+  daily (its activity extends the pool and its balance, not the flag).
+  Same for `FeeWaiver` and the per-asset config entries
+  (`MinLiquidity`, `MaxSettlementAmount`, `AssetFee`, `FeesAccrued`).
+- **Archival is never a permission change.** A restored entry behaves
+  exactly as before archival; no re-registration or re-configuration is
+  needed.
+
+> **Known gap (flagged, not fixed here):** the module comment in
+> `src/storage.rs` states TTLs are "extended on every read/write", but the
+> read accessors for the write-only-bumped entries above do not extend.
+> In particular `is_anchor` / `is_fee_waived` reads inside
+> `open_settlement` and `provide_liquidity` do not refresh the anchor's
+> flag, so a long-registered but never re-registered anchor's flag (and a
+> dormant provider's balance) can archive despite ongoing activity. See
+> [#176](https://github.com/AnchorNet-Org/AnchorNet-Contracts/issues/176)
+> for whether reads should extend these entries.
+
 ## Contract metadata
 
 The compiled wasm embeds `Name` and `Description` entries (via

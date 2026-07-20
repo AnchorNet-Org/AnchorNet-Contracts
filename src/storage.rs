@@ -1,7 +1,12 @@
 //! Storage keys and typed accessors for the AnchorNet contract.
 //!
-//! All persistent entries use the `persistent` storage with a TTL that is
-//! extended on every read/write so that active pools are not archived.
+//! Contract configuration (admin, operator, paused flag, fees, counters)
+//! lives in `instance` storage and is kept alive by [`extend_instance_ttl`].
+//! Data entries use `persistent` storage: every write extends the entry's
+//! TTL, and reads additionally extend it for `Pool`, `Settlement` and the
+//! anchor/asset registration lists — but not for the other entries (see
+//! the README's "Storage & TTL" section for the full policy and its
+//! operational implications).
 
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
