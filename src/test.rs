@@ -2457,6 +2457,75 @@ fn test_total_settled_amount_is_zero_with_no_settlements() {
 }
 
 #[test]
+fn test_total_settled_amount_all_is_zero_with_no_settlements() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    assert_eq!(client.total_settled_amount_all(), 0);
+}
+
+#[test]
+fn test_total_settled_amount_all_sums_every_status() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 2_000);
+    client.set_settlement_expiry_ledgers(&50);
+
+    // One settlement in each of the four lifecycle statuses, with distinct
+    // amounts so a missed status shows up in the total.
+    client.open_settlement(&anchor, &asset, &100); // stays Pending
+    let executed = client.open_settlement(&anchor, &asset, &200);
+    let cancelled = client.open_settlement(&anchor, &asset, &400);
+    let expired = client.open_settlement(&anchor, &asset, &800); // opened_at == 0
+    client.execute_settlement(&executed);
+    client.cancel_settlement(&cancelled);
+    env.ledger().set_sequence_number(50);
+    client.cancel_expired_settlement(&expired);
+
+    assert_eq!(
+        client.settlement(&expired).status,
+        SettlementStatus::Expired
+    );
+    assert_eq!(client.total_settled_amount_all(), 1_500);
+
+    // The single-call total matches manually adding every per-status read,
+    // and those per-status reads are unaffected by the new aggregate.
+    let by_status = client.total_settled_amount(&SettlementStatus::Pending)
+        + client.total_settled_amount(&SettlementStatus::Executed)
+        + client.total_settled_amount(&SettlementStatus::Cancelled)
+        + client.total_settled_amount(&SettlementStatus::Expired);
+    assert_eq!(client.total_settled_amount_all(), by_status);
+    assert_eq!(client.total_settled_amount(&SettlementStatus::Pending), 100);
+    assert_eq!(
+        client.total_settled_amount(&SettlementStatus::Executed),
+        200
+    );
+    assert_eq!(
+        client.total_settled_amount(&SettlementStatus::Cancelled),
+        400
+    );
+    assert_eq!(client.total_settled_amount(&SettlementStatus::Expired), 800);
+}
+
+#[test]
+fn test_total_settled_amount_all_tracks_lifecycle_transitions() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // The cross-status total counts a settlement once at every lifecycle
+    // stage: opening adds its amount, and later transitions (execute or
+    // cancel) merely move it between statuses without changing the total.
+    let a = client.open_settlement(&anchor, &asset, &300);
+    let b = client.open_settlement(&anchor, &asset, &200);
+    assert_eq!(client.total_settled_amount_all(), 500);
+
+    client.execute_settlement(&a);
+    assert_eq!(client.total_settled_amount_all(), 500);
+
+    client.cancel_settlement(&b);
+    assert_eq!(client.total_settled_amount_all(), 500);
+}
+
+#[test]
 fn test_anchor_balances_lists_only_nonzero_holdings() {
     let env = Env::default();
     env.mock_all_auths();
