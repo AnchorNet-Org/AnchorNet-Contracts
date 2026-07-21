@@ -2136,11 +2136,7 @@ fn test_cancel_expired_and_settlement_race_expired_wins() {
     assert_eq!(client.total_liquidity(&asset), 1_000);
 
     // cancel_settlement sees Expired != Pending and rejects.
-    let err = client
-        .try_cancel_settlement(&id)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_cancel_settlement(&id).err().unwrap().unwrap();
     assert_eq!(err, Error::InvalidSettlementState);
     // Pool unchanged — no double-credit.
     assert_eq!(client.total_liquidity(&asset), 1_000);
@@ -2991,10 +2987,7 @@ fn test_list_settlements_by_anchor_start_past_end_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
     client.open_settlement(&anchor, &asset, &100);
 
-    assert_eq!(
-        client.list_settlements_by_anchor(&anchor, &3, &10).len(),
-        0
-    );
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &3, &10).len(), 0);
     assert_eq!(
         client
             .list_settlements_by_anchor(&anchor, &u64::MAX, &10)
@@ -3009,14 +3002,8 @@ fn test_list_settlements_by_anchor_limit_zero_returns_empty() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
 
-    assert_eq!(
-        client.list_settlements_by_anchor(&anchor, &1, &0).len(),
-        0
-    );
-    assert_eq!(
-        client.list_settlements_by_anchor(&anchor, &0, &0).len(),
-        0
-    );
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &1, &0).len(), 0);
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &0, &0).len(), 0);
 }
 
 #[test]
