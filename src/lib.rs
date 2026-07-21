@@ -1076,32 +1076,74 @@ impl AnchornetContract {
 
     /// Adds `amount` of `asset` to `provider`'s balance and the pool total,
     /// incrementing the pool's provider count on a first contribution.
+    ///
     /// Callers must first validate that `amount` is positive and `provider`
     /// is a registered anchor.
+    ///
+    /// # Invariant (paired with [`Self::do_withdraw`])
+    ///
+    /// The `pool.providers` counter is paired: it is incremented here when a
+    /// balance first goes from zero to positive, and decremented in
+    /// [`Self::do_withdraw`] when a balance returns to zero. Any code path that
+    /// mutates provider balances outside these two functions must maintain the
+    /// pairing, or `do_withdraw`'s underflow guard will panic. The `checked_add`s
+    /// mirror that guard and [`Self::calculate_fee`].
     fn do_provide(env: &Env, provider: &Address, asset: &Symbol, amount: i128) {
         let mut pool = storage::get_pool(env, asset);
         let prior = storage::get_balance(env, provider, asset);
         if prior == 0 {
-            pool.providers += 1;
+            pool.providers = pool
+                .providers
+                .checked_add(1)
+                .expect("pool providers overflow in do_provide");
         }
-        pool.total += amount;
+        pool.total = pool
+            .total
+            .checked_add(amount)
+            .expect("pool total overflow in do_provide");
+        let new_balance = prior
+            .checked_add(amount)
+            .expect("provider balance overflow in do_provide");
         storage::set_pool(env, asset, &pool);
-        storage::set_balance(env, provider, asset, prior + amount);
+        storage::set_balance(env, provider, asset, new_balance);
         storage::remember_asset(env, asset);
         events::liquidity_provided(env, provider, asset, amount);
     }
 
     /// Moves `amount` of `asset` out of `provider`'s balance and the pool
     /// total, dropping the provider count if the balance reaches zero.
+    ///
     /// Callers must first validate that `amount` is positive and does not
-    /// exceed the provider's balance.
+    /// exceed the provider's balance (see [`Self::withdraw_liquidity`],
+    /// [`Self::withdraw_liquidity_multi`], and
+    /// [`Self::withdraw_all_liquidity`]).
+    ///
+    /// # Invariants
+    ///
+    /// `pool.providers` is only decremented for a `provider` whose balance was
+    /// previously incremented by [`Self::do_provide`] — those two calls are the
+    /// only way the counter changes. The `checked_sub`s below are
+    /// defense-in-depth: they turn a would-be underflow (which today would trap
+    /// under `overflow-checks = true`) into a clear panic message distinct from
+    /// user-facing errors, so any future refactor that violates this invariant
+    /// fails loudly instead of corrupting the fund-accounting counter silently.
+    /// This mirrors [`Self::calculate_fee`], which already guards its
+    /// arithmetic with `checked_*(...).expect(...)`.
     fn do_withdraw(env: &Env, provider: &Address, asset: &Symbol, amount: i128) {
         let prior = storage::get_balance(env, provider, asset);
         let mut pool = storage::get_pool(env, asset);
-        pool.total -= amount;
-        let remaining = prior - amount;
+        pool.total = pool
+            .total
+            .checked_sub(amount)
+            .expect("pool total underflow in do_withdraw");
+        let remaining = prior
+            .checked_sub(amount)
+            .expect("provider balance underflow in do_withdraw");
         if remaining == 0 {
-            pool.providers -= 1;
+            pool.providers = pool
+                .providers
+                .checked_sub(1)
+                .expect("pool providers underflow in do_withdraw");
         }
         storage::set_pool(env, asset, &pool);
         storage::set_balance(env, provider, asset, remaining);

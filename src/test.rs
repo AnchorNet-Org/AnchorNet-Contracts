@@ -2504,3 +2504,79 @@ fn test_anchor_balances_empty_for_a_provider_with_no_liquidity() {
 
     assert_eq!(client.anchor_balances(&stranger, &0, &10).len(), 0);
 }
+
+/// The `pool.providers` counter must track distinct active providers exactly
+/// through interleaved partial and full provide/withdraw sequences: partial
+/// withdrawals never decrement it, full withdrawals decrement it by one, and a
+/// re-entry from a zero balance increments it again. This exercises the
+/// [`do_withdraw`] underflow guard end-to-end via the real public entry points
+/// — the actual surface where the invariant could be broken.
+#[test]
+fn providers_counter_survives_interleaved_provide_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a);
+    client.register_anchor(&b);
+    client.register_anchor(&c);
+
+    client.provide_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    client.provide_liquidity(&b, &usdc, &2_000);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    // Partial withdrawal keeps a positive balance → count unchanged.
+    client.withdraw_liquidity(&a, &usdc, &300);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    client.provide_liquidity(&c, &usdc, &500);
+    assert_eq!(client.pool(&usdc).providers, 3);
+
+    // Full withdrawal → count drops to 2.
+    client.withdraw_liquidity(&b, &usdc, &2_000);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    // a withdraws its remaining 700 → count drops to 1.
+    client.withdraw_liquidity(&a, &usdc, &700);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    // c tops up while already active → count unchanged.
+    client.provide_liquidity(&c, &usdc, &100);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    // c withdraws everything (500 + 100) → count drops to 0.
+    client.withdraw_liquidity(&c, &usdc, &600);
+    assert_eq!(client.pool(&usdc).providers, 0);
+
+    // Re-entry from zero balance increments back to 1.
+    client.provide_liquidity(&a, &usdc, &50);
+    assert_eq!(client.pool(&usdc).providers, 1);
+}
+
+/// A full withdrawal that returns a provider's balance to zero still
+/// decrements the provider count — guards against a regression in the
+/// unchanged zero-balance exit path.
+#[test]
+fn full_withdraw_still_decrements_providers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+    let a = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a);
+
+    client.provide_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    client.withdraw_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 0);
+}
