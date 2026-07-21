@@ -622,6 +622,9 @@ impl AnchornetContract {
         storage::set_pool(&env, &asset, &pool);
 
         let fee = if storage::is_fee_waived(&env, &anchor) {
+            let waived_fee = Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset));
+            let current_volume = storage::get_waived_fee_volume(&env, &asset);
+            storage::set_waived_fee_volume(&env, &asset, current_volume + waived_fee);
             0
         } else {
             Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))
@@ -801,6 +804,21 @@ impl AnchornetContract {
         let mut total: i128 = 0;
         for asset in storage::get_asset_list(&env).iter() {
             total += storage::get_fees_accrued(&env, &asset);
+        }
+        total
+    }
+
+    /// Returns the forgone protocol fee revenue for `asset` due to active waivers.
+    pub fn waived_fee_volume(env: Env, asset: Symbol) -> i128 {
+        storage::get_waived_fee_volume(&env, &asset)
+    }
+
+    /// Returns the sum of [`waived_fee_volume`](Self::waived_fee_volume) across every
+    /// asset that has ever had liquidity provided.
+    pub fn total_waived_fee_volume(env: Env) -> i128 {
+        let mut total: i128 = 0;
+        for asset in storage::get_asset_list(&env).iter() {
+            total += storage::get_waived_fee_volume(&env, &asset);
         }
         total
     }

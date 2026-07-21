@@ -1931,6 +1931,56 @@ fn test_total_fees_accrued_sums_across_assets() {
 }
 
 #[test]
+fn test_waived_fee_volume_accumulates() {
+    let env = Env::default();
+    let (client, admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    // Not waived initially
+    client.open_settlement(&anchor, &asset, &200);
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    // Apply waiver
+    client.set_fee_waiver(&anchor, &true);
+
+    // Waived settlement 1: 1% of 300 = 3
+    client.open_settlement(&anchor, &asset, &300);
+    assert_eq!(client.waived_fee_volume(&asset), 3);
+
+    // Waived settlement 2: 1% of 400 = 4
+    client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.waived_fee_volume(&asset), 7);
+}
+
+#[test]
+fn test_total_waived_fee_volume_sums_across_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.set_fee(&100); // 1%
+    client.set_fee_waiver(&anchor, &true);
+
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+    assert_eq!(client.total_waived_fee_volume(), 0);
+
+    // 1% of 400 = 4 in USDC
+    client.open_settlement(&anchor, &usdc, &400);
+    // 1% of 200 = 2 in EURC
+    client.open_settlement(&anchor, &eurc, &200);
+
+    assert_eq!(client.total_waived_fee_volume(), 6);
+}
+
+#[test]
 fn test_list_settlements_by_status_filters_lifecycle_state() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
