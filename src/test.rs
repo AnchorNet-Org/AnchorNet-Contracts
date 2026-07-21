@@ -1768,6 +1768,67 @@ fn test_withdraw_all_liquidity_blocked_by_min_liquidity_floor() {
 }
 
 #[test]
+fn test_withdraw_event_parity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Capture events from withdraw_all_liquidity.
+    let amount = client.withdraw_all_liquidity(&anchor, &asset);
+    let events_all = env.events().all();
+
+    assert_eq!(amount, 1_000);
+    assert_eq!(
+        events_all,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                amount.into_val(&env),
+            ),
+        ],
+        "withdraw_all_liquidity must emit the same event shape as withdraw_liquidity \
+         for an equivalent withdrawal"
+    );
+}
+
+#[test]
+fn test_withdraw_liquidity_event_shape_matches_withdraw_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Capture events from withdraw_liquidity with the full balance.
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    let events_all = env.events().all();
+
+    assert_eq!(
+        events_all,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                1_000i128.into_val(&env),
+            ),
+        ],
+        "withdraw_liquidity with the full balance must emit the same event shape \
+         as withdraw_all_liquidity for an equivalent withdrawal"
+    );
+}
+
+#[test]
 fn test_min_liquidity_floor_is_per_asset() {
     let env = Env::default();
     env.mock_all_auths();

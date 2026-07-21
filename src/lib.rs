@@ -567,9 +567,13 @@ impl AnchornetContract {
     }
 
     /// Withdraws `provider`'s entire liquidity balance in `asset` in a single
-    /// call, returning the withdrawn amount. A convenience wrapper around
-    /// [`withdraw_liquidity`](Self::withdraw_liquidity) for providers exiting
-    /// a pool entirely, sparing them from having to first read their balance.
+    /// call, returning the withdrawn amount. Delegates to
+    /// [`withdraw_liquidity`](Self::withdraw_liquidity) internally so that
+    /// both entrypoints share an identical event-emission path — any future
+    /// changes to the event shape or argument encoding in
+    /// [`withdraw_liquidity`](Self::withdraw_liquidity) are automatically
+    /// reflected here, keeping the off-chain indexer described in the README
+    /// consistent regardless of which entrypoint a caller uses.
     /// Fails with [`Error::InsufficientLiquidity`] if the provider's balance
     /// is already zero, or [`Error::BelowMinLiquidity`] if it would leave the
     /// pool below its configured [`min_liquidity`](Self::min_liquidity)
@@ -579,16 +583,11 @@ impl AnchornetContract {
         provider: Address,
         asset: Symbol,
     ) -> Result<i128, Error> {
-        provider.require_auth();
-        Self::require_not_paused(&env)?;
-
         let amount = storage::get_balance(&env, &provider, &asset);
         if amount == 0 {
             return Err(Error::InsufficientLiquidity);
         }
-        Self::require_min_liquidity(&env, &asset, amount)?;
-
-        Self::do_withdraw(&env, &provider, &asset, amount);
+        Self::withdraw_liquidity(env, provider, asset, amount)?;
         Ok(amount)
     }
 
@@ -1114,9 +1113,10 @@ impl AnchornetContract {
     /// total, dropping the provider count if the balance reaches zero.
     ///
     /// Callers must first validate that `amount` is positive and does not
-    /// exceed the provider's balance (see [`Self::withdraw_liquidity`],
-    /// [`Self::withdraw_liquidity_multi`], and
-    /// [`Self::withdraw_all_liquidity`]).
+    /// exceed the provider's balance (see [`Self::withdraw_liquidity`] and
+    /// [`Self::withdraw_liquidity_multi`];
+    /// [`Self::withdraw_all_liquidity`] delegates to
+    /// [`Self::withdraw_liquidity`] and is therefore an indirect caller).
     ///
     /// # Invariants
     ///
