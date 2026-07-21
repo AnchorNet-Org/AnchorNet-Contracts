@@ -2504,3 +2504,362 @@ fn test_anchor_balances_empty_for_a_provider_with_no_liquidity() {
 
     assert_eq!(client.anchor_balances(&stranger, &0, &10).len(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Atomicity regression tests — register_anchors
+// ---------------------------------------------------------------------------
+
+/// A batch of five anchors where the fourth entry is already registered must
+/// leave the registry completely unchanged: zero anchors from the batch land,
+/// and `anchor_count()` is unaffected.
+#[test]
+fn test_register_anchors_atomic_fourth_preregistered_rejects_whole_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    // Generate five distinct anchor addresses.
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let a4 = Address::generate(&env);
+    let a5 = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // Pre-register the fourth anchor individually so it already exists on-chain.
+    client.register_anchor(&a4);
+    assert_eq!(client.anchor_count(), 1);
+
+    // Submit a batch of five where the fourth entry collides with the
+    // already-registered anchor.
+    let err = client
+        .try_register_anchors(&vec![
+            &env,
+            a1.clone(),
+            a2.clone(),
+            a3.clone(),
+            a4.clone(), // already registered — makes the whole batch invalid
+            a5.clone(),
+        ])
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::AnchorAlreadyRegistered);
+
+    // The count must not have changed: only the pre-existing anchor is registered.
+    assert_eq!(client.anchor_count(), 1);
+
+    // None of the new-in-batch anchors (a1, a2, a3, a5) may have been written.
+    assert!(!client.is_anchor(&a1));
+    assert!(!client.is_anchor(&a2));
+    assert!(!client.is_anchor(&a3));
+    assert!(!client.is_anchor(&a5));
+
+    // a4 was already registered before the call and must still be registered.
+    assert!(client.is_anchor(&a4));
+}
+
+/// A batch of five unique, previously-unregistered anchors must all land
+/// atomically: `is_anchor` is true for every entry and `anchor_count()`
+/// increases by exactly five.
+#[test]
+fn test_register_anchors_valid_batch_of_five_registers_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let a4 = Address::generate(&env);
+    let a5 = Address::generate(&env);
+
+    client.initialize(&admin);
+    let count_before = client.anchor_count();
+
+    client.register_anchors(&vec![
+        &env,
+        a1.clone(),
+        a2.clone(),
+        a3.clone(),
+        a4.clone(),
+        a5.clone(),
+    ]);
+
+    // Every entry in the batch must be registered.
+    assert!(client.is_anchor(&a1));
+    assert!(client.is_anchor(&a2));
+    assert!(client.is_anchor(&a3));
+    assert!(client.is_anchor(&a4));
+    assert!(client.is_anchor(&a5));
+
+    // The count must have grown by exactly the batch size.
+    assert_eq!(client.anchor_count(), count_before + 5);
+}
+
+/// A batch of five anchors where the fourth entry is a duplicate *within* the
+/// batch itself (not yet registered) must still reject the entire batch.
+#[test]
+fn test_register_anchors_atomic_fourth_is_intra_batch_duplicate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let a5 = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // a1 is the first entry but also re-appears as the fourth — an intra-batch
+    // duplicate.
+    let err = client
+        .try_register_anchors(&vec![
+            &env,
+            a1.clone(),
+            a2.clone(),
+            a3.clone(),
+            a1.clone(), // duplicate of the first entry
+            a5.clone(),
+        ])
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::AnchorAlreadyRegistered);
+
+    // None of the five addresses may be registered.
+    assert_eq!(client.anchor_count(), 0);
+    assert!(!client.is_anchor(&a1));
+    assert!(!client.is_anchor(&a2));
+    assert!(!client.is_anchor(&a3));
+    assert!(!client.is_anchor(&a5));
+}
+
+// ---------------------------------------------------------------------------
+// Atomicity regression tests — provide_liquidity_multi
+// ---------------------------------------------------------------------------
+
+/// A multi-provide batch where the fourth request contains a duplicate asset
+/// must reject the entire batch: no balances change.
+#[test]
+fn test_provide_liquidity_multi_atomic_fourth_duplicate_asset_rejects_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    let gbpc = symbol_short!("GBPC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Four distinct assets followed by a fifth entry that duplicates the
+    // second asset (eurc), making the fourth position the problematic one.
+    let requests = vec![
+        &env,
+        (usdc.clone(), 100i128),
+        (eurc.clone(), 200i128),
+        (gbpc.clone(), 300i128),
+        (eurc.clone(), 50i128), // duplicate — invalid fourth entry
+    ];
+
+    let err = client
+        .try_provide_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::DuplicateAssetInBatch);
+
+    // No balance must have been written for any asset.
+    assert_eq!(client.balance(&anchor, &usdc), 0);
+    assert_eq!(client.balance(&anchor, &eurc), 0);
+    assert_eq!(client.balance(&anchor, &gbpc), 0);
+    assert_eq!(client.total_liquidity(&usdc), 0);
+    assert_eq!(client.total_liquidity(&eurc), 0);
+    assert_eq!(client.total_liquidity(&gbpc), 0);
+}
+
+/// A fully valid multi-provide batch of five (asset, amount) pairs must fund
+/// every asset and increase the pool totals by the corresponding amounts.
+#[test]
+fn test_provide_liquidity_multi_valid_batch_of_five_funds_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    let gbpc = symbol_short!("GBPC");
+    let xlm = symbol_short!("XLM");
+    let btc = symbol_short!("BTC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    let requests = vec![
+        &env,
+        (usdc.clone(), 100i128),
+        (eurc.clone(), 200i128),
+        (gbpc.clone(), 300i128),
+        (xlm.clone(), 400i128),
+        (btc.clone(), 500i128),
+    ];
+
+    client.provide_liquidity_multi(&anchor, &requests);
+
+    assert_eq!(client.balance(&anchor, &usdc), 100);
+    assert_eq!(client.balance(&anchor, &eurc), 200);
+    assert_eq!(client.balance(&anchor, &gbpc), 300);
+    assert_eq!(client.balance(&anchor, &xlm), 400);
+    assert_eq!(client.balance(&anchor, &btc), 500);
+    assert_eq!(client.total_liquidity(&usdc), 100);
+    assert_eq!(client.total_liquidity(&eurc), 200);
+    assert_eq!(client.total_liquidity(&gbpc), 300);
+    assert_eq!(client.total_liquidity(&xlm), 400);
+    assert_eq!(client.total_liquidity(&btc), 500);
+}
+
+// ---------------------------------------------------------------------------
+// Atomicity regression tests — withdraw_liquidity_multi
+// ---------------------------------------------------------------------------
+
+/// A multi-withdraw batch where the fourth request has insufficient balance
+/// must reject the entire batch: no balances change.
+#[test]
+fn test_withdraw_liquidity_multi_atomic_fourth_insufficient_rejects_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    let gbpc = symbol_short!("GBPC");
+    let xlm = symbol_short!("XLM");
+    let btc = symbol_short!("BTC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &500);
+    client.provide_liquidity(&anchor, &eurc, &500);
+    client.provide_liquidity(&anchor, &gbpc, &500);
+    client.provide_liquidity(&anchor, &xlm, &50); // intentionally small
+    client.provide_liquidity(&anchor, &btc, &500);
+
+    // The fourth leg (xlm) requests 400 but the provider only holds 50 —
+    // the whole batch must be rejected.
+    let requests = vec![
+        &env,
+        (usdc.clone(), 100i128),
+        (eurc.clone(), 100i128),
+        (gbpc.clone(), 100i128),
+        (xlm.clone(), 400i128), // exceeds balance — invalid fourth entry
+        (btc.clone(), 100i128),
+    ];
+
+    let err = client
+        .try_withdraw_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::InsufficientLiquidity);
+
+    // Every balance must be exactly as it was before the call.
+    assert_eq!(client.balance(&anchor, &usdc), 500);
+    assert_eq!(client.balance(&anchor, &eurc), 500);
+    assert_eq!(client.balance(&anchor, &gbpc), 500);
+    assert_eq!(client.balance(&anchor, &xlm), 50);
+    assert_eq!(client.balance(&anchor, &btc), 500);
+}
+
+/// A fully valid multi-withdraw batch of five (asset, amount) pairs must
+/// reduce every balance by the requested amount and leave the totals correct.
+#[test]
+fn test_withdraw_liquidity_multi_valid_batch_of_five_withdraws_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    let gbpc = symbol_short!("GBPC");
+    let xlm = symbol_short!("XLM");
+    let btc = symbol_short!("BTC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &500);
+    client.provide_liquidity(&anchor, &eurc, &500);
+    client.provide_liquidity(&anchor, &gbpc, &500);
+    client.provide_liquidity(&anchor, &xlm, &500);
+    client.provide_liquidity(&anchor, &btc, &500);
+
+    let requests = vec![
+        &env,
+        (usdc.clone(), 100i128),
+        (eurc.clone(), 200i128),
+        (gbpc.clone(), 300i128),
+        (xlm.clone(), 400i128),
+        (btc.clone(), 500i128),
+    ];
+
+    client.withdraw_liquidity_multi(&anchor, &requests);
+
+    assert_eq!(client.balance(&anchor, &usdc), 400);
+    assert_eq!(client.balance(&anchor, &eurc), 300);
+    assert_eq!(client.balance(&anchor, &gbpc), 200);
+    assert_eq!(client.balance(&anchor, &xlm), 100);
+    assert_eq!(client.balance(&anchor, &btc), 0);
+    assert_eq!(client.total_liquidity(&usdc), 400);
+    assert_eq!(client.total_liquidity(&eurc), 300);
+    assert_eq!(client.total_liquidity(&gbpc), 200);
+    assert_eq!(client.total_liquidity(&xlm), 100);
+    assert_eq!(client.total_liquidity(&btc), 0);
+}
+
+/// A multi-withdraw batch where the fourth request is a duplicate asset must
+/// reject the entire batch atomically.
+#[test]
+fn test_withdraw_liquidity_multi_atomic_fourth_duplicate_asset_rejects_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    let gbpc = symbol_short!("GBPC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+    client.provide_liquidity(&anchor, &gbpc, &1_000);
+
+    // The fourth entry duplicates the second (eurc).
+    let requests = vec![
+        &env,
+        (usdc.clone(), 100i128),
+        (eurc.clone(), 100i128),
+        (gbpc.clone(), 100i128),
+        (eurc.clone(), 50i128), // duplicate — invalid fourth entry
+    ];
+
+    let err = client
+        .try_withdraw_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::DuplicateAssetInBatch);
+
+    // No balance must have changed.
+    assert_eq!(client.balance(&anchor, &usdc), 1_000);
+    assert_eq!(client.balance(&anchor, &eurc), 1_000);
+    assert_eq!(client.balance(&anchor, &gbpc), 1_000);
+}
