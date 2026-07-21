@@ -98,6 +98,7 @@ state.
 | `set_fee_waiver(anchor, waived)` | admin | Grant or revoke a fee waiver for a registered anchor |
 | `is_fee_waived(anchor)` | – | Check whether an anchor is exempt from settlement fees |
 | `list_fee_waived_anchors(start, limit)` | – | Page through currently registered anchors with an active fee waiver |
+| `fee_waived_anchor_count()` | – | Read the number of currently registered anchors with an active fee waiver |
 | `version()` | – | Read the contract interface version |
 
 ### Settlement

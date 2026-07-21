@@ -1365,6 +1365,102 @@ fn test_list_fee_waived_anchors_empty_by_default() {
 }
 
 #[test]
+fn test_fee_waived_anchor_count_zero_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_increments_on_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+
+    client.set_fee_waiver(&a1, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_decrements_on_revoke() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+
+    client.set_fee_waiver(&a1, &false);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+
+    client.set_fee_waiver(&a2, &false);
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_excludes_deregistered() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+
+    client.deregister_anchor(&a1);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_matches_list_length() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.register_anchor(&a3);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a3, &true);
+
+    assert_eq!(
+        client.fee_waived_anchor_count(),
+        client.list_fee_waived_anchors(&0, &10).len(),
+    );
+}
+
+#[test]
 fn test_register_anchors_batch_registers_all() {
     let env = Env::default();
     env.mock_all_auths();

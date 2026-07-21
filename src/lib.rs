@@ -295,6 +295,21 @@ impl AnchornetContract {
         out
     }
 
+    /// Returns the number of currently registered anchors that have an active
+    /// fee waiver. Scans the anchor list (same as
+    /// [`list_fee_waived_anchors`](Self::list_fee_waived_anchors)) but
+    /// returns a single count instead of a page, sparing callers from
+    /// paginating just to get a total.
+    pub fn fee_waived_anchor_count(env: Env) -> u32 {
+        let mut count = 0;
+        for anchor in storage::get_anchor_list(&env).iter() {
+            if storage::is_anchor(&env, &anchor) && storage::is_fee_waived(&env, &anchor) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Collects the accrued protocol fees for `asset`, resetting the balance to
     /// zero and returning the collected amount. Admin only.
     pub fn collect_fees(env: Env, asset: Symbol) -> Result<i128, Error> {
