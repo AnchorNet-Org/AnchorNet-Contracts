@@ -1445,6 +1445,60 @@ fn test_register_anchors_batch_empty_is_noop() {
 }
 
 #[test]
+fn test_register_anchors_batch_emits_events_in_order() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchors(&vec![&env, a1.clone(), a2.clone(), a3.clone()]);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a1.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a2.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a3.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_register_anchors_batch_failure_emits_zero_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+
+    let a2 = Address::generate(&env);
+    let _ = client
+        .try_register_anchors(&vec![&env, a2.clone(), a1.clone()]);
+
+    let events = env.events().all();
+    assert_eq!(events, vec![&env]);
+}
+
+#[test]
 fn test_withdraw_all_liquidity_returns_full_balance() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
