@@ -1251,6 +1251,21 @@ fn test_propose_admin_overwrites_prior_proposal() {
 }
 
 #[test]
+fn test_propose_admin_rejects_current_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    let err = client.try_propose_admin(&admin).err().unwrap().unwrap();
+
+    assert_eq!(err, Error::InvalidAdminCandidate);
+    // No pending admin was set.
+    let err = client.try_pending_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoPendingAdmin);
+}
+
+#[test]
 fn test_pending_admin_unset_by_default() {
     let env = Env::default();
     let (client, admin) = setup(&env);

@@ -58,4 +58,6 @@ pub enum Error {
     AboveMaxSettlementAmount = 19,
     /// The same asset appeared more than once in a batch operation.
     DuplicateAssetInBatch = 20,
+    /// The proposed administrator is the same as the current administrator.
+    InvalidAdminCandidate = 21,
 }

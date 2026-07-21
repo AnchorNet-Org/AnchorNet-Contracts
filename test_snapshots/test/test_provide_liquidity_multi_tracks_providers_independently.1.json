@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 3,
+    "address": 4,
     "nonce": 0,
     "mux_id": 0
   },
@@ -28,7 +28,118 @@
     ],
     [
       [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "register_anchor",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [
+      [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "provide_liquidity_multi",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "vec": [
+                    {
+                      "vec": [
+                        {
+                          "symbol": "AST1"
+                        },
+                        {
+                          "i128": "100"
+                        }
+                      ]
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "AST2"
+                        },
+                        {
+                          "i128": "100"
+                        }
+                      ]
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "AST3"
+                        },
+                        {
+                          "i128": "100"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [],
+    [],
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "withdraw_liquidity_multi",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "vec": [
+                    {
+                      "vec": [
+                        {
+                          "symbol": "AST1"
+                        },
+                        {
+                          "i128": "100"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [],
+    [],
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
         {
           "function": {
             "contract_fn": {
@@ -36,13 +147,13 @@
               "function_name": "provide_liquidity",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "symbol": "USDC"
+                  "symbol": "AST2"
                 },
                 {
-                  "i128": "1000"
+                  "i128": "50"
                 }
               ]
             }
@@ -51,75 +162,8 @@
         }
       ]
     ],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "set_asset_fee",
-              "args": [
-                {
-                  "symbol": "USDC"
-                },
-                {
-                  "u32": 500
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "set_fee_waiver",
-              "args": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "open_settlement",
-              "args": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "symbol": "USDC"
-                },
-                {
-                  "i128": "1000"
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
+    [],
+    [],
     []
   ],
   "ledger": {
@@ -169,17 +213,16 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "AnchorList"
+                    "symbol": "Anchor"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                   }
                 ]
               },
               "durability": "persistent",
               "val": {
-                "vec": [
-                  {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                  }
-                ]
+                "bool": true
               }
             }
           },
@@ -197,16 +240,20 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "AssetFee"
-                  },
-                  {
-                    "symbol": "USDC"
+                    "symbol": "AnchorList"
                   }
                 ]
               },
               "durability": "persistent",
               "val": {
-                "u32": 500
+                "vec": [
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  }
+                ]
               }
             }
           },
@@ -232,7 +279,13 @@
               "val": {
                 "vec": [
                   {
-                    "symbol": "USDC"
+                    "symbol": "AST1"
+                  },
+                  {
+                    "symbol": "AST2"
+                  },
+                  {
+                    "symbol": "AST3"
                   }
                 ]
               }
@@ -258,13 +311,13 @@
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                   },
                   {
-                    "symbol": "USDC"
+                    "symbol": "AST1"
                   }
                 ]
               },
               "durability": "persistent",
               "val": {
-                "i128": "1000"
+                "i128": "0"
               }
             }
           },
@@ -282,16 +335,79 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "FeeWaiver"
+                    "symbol": "Balance"
                   },
                   {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  },
+                  {
+                    "symbol": "AST2"
                   }
                 ]
               },
               "durability": "persistent",
               "val": {
-                "bool": true
+                "i128": "100"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 518400
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Balance"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  },
+                  {
+                    "symbol": "AST3"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "i128": "100"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 518400
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Balance"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  },
+                  {
+                    "symbol": "AST2"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "i128": "50"
               }
             }
           },
@@ -312,7 +428,7 @@
                     "symbol": "Pool"
                   },
                   {
-                    "symbol": "USDC"
+                    "symbol": "AST1"
                   }
                 ]
               },
@@ -324,7 +440,7 @@
                       "symbol": "asset"
                     },
                     "val": {
-                      "symbol": "USDC"
+                      "symbol": "AST1"
                     }
                   },
                   {
@@ -332,7 +448,7 @@
                       "symbol": "providers"
                     },
                     "val": {
-                      "u32": 1
+                      "u32": 0
                     }
                   },
                   {
@@ -361,10 +477,10 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "Settlement"
+                    "symbol": "Pool"
                   },
                   {
-                    "u64": "1"
+                    "symbol": "AST2"
                   }
                 ]
               },
@@ -373,62 +489,26 @@
                 "map": [
                   {
                     "key": {
-                      "symbol": "amount"
-                    },
-                    "val": {
-                      "i128": "1000"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "anchor"
-                    },
-                    "val": {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  },
-                  {
-                    "key": {
                       "symbol": "asset"
                     },
                     "val": {
-                      "symbol": "USDC"
+                      "symbol": "AST2"
                     }
                   },
                   {
                     "key": {
-                      "symbol": "fee"
+                      "symbol": "providers"
                     },
                     "val": {
-                      "i128": "0"
+                      "u32": 2
                     }
                   },
                   {
                     "key": {
-                      "symbol": "id"
+                      "symbol": "total"
                     },
                     "val": {
-                      "u64": "1"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "opened_at"
-                    },
-                    "val": {
-                      "u32": 0
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "status"
-                    },
-                    "val": {
-                      "vec": [
-                        {
-                          "symbol": "Pending"
-                        }
-                      ]
+                      "i128": "150"
                     }
                   }
                 ]
@@ -449,16 +529,41 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "WaivedFeeVolume"
+                    "symbol": "Pool"
                   },
                   {
-                    "symbol": "USDC"
+                    "symbol": "AST3"
                   }
                 ]
               },
               "durability": "persistent",
               "val": {
-                "i128": "50"
+                "map": [
+                  {
+                    "key": {
+                      "symbol": "asset"
+                    },
+                    "val": {
+                      "symbol": "AST3"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "providers"
+                    },
+                    "val": {
+                      "u32": 1
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "total"
+                    },
+                    "val": {
+                      "i128": "100"
+                    }
+                  }
+                ]
               }
             }
           },
@@ -491,18 +596,6 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                      }
-                    },
-                    {
-                      "key": {
-                        "vec": [
-                          {
-                            "symbol": "SettlementCount"
-                          }
-                        ]
-                      },
-                      "val": {
-                        "u64": "1"
                       }
                     }
                   ]
@@ -543,6 +636,26 @@
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
               "key": {
                 "ledger_key_nonce": {
+                  "nonce": "5541220902715666415"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "key": {
+                "ledger_key_nonce": {
                   "nonce": "1033654523790656264"
                 }
               },
@@ -560,7 +673,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "4837995959683129791"
@@ -580,30 +693,10 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "2032731177588607455"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "5541220902715666415"
                 }
               },
               "durability": "temporary",
