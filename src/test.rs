@@ -2512,6 +2512,47 @@ fn test_provide_liquidity_multi_funds_every_asset() {
 }
 
 #[test]
+fn test_provide_liquidity_multi_tracks_providers_independently() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor1 = Address::generate(&env);
+    let anchor2 = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+    let asset3 = symbol_short!("AST3");
+    
+    client.initialize(&admin);
+    client.register_anchor(&anchor1);
+    client.register_anchor(&anchor2);
+
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 100),
+        (asset3.clone(), 100),
+    ];
+    client.provide_liquidity_multi(&anchor1, &requests);
+
+    assert_eq!(client.pool(&asset1).providers, 1);
+    assert_eq!(client.pool(&asset2).providers, 1);
+    assert_eq!(client.pool(&asset3).providers, 1);
+
+    let withdraw_requests = vec![&env, (asset1.clone(), 100)];
+    client.withdraw_liquidity_multi(&anchor1, &withdraw_requests);
+
+    assert_eq!(client.pool(&asset1).providers, 0);
+    assert_eq!(client.pool(&asset2).providers, 1);
+    assert_eq!(client.pool(&asset3).providers, 1);
+
+    client.provide_liquidity(&anchor2, &asset2, &50);
+
+    assert_eq!(client.pool(&asset1).providers, 0);
+    assert_eq!(client.pool(&asset2).providers, 2);
+    assert_eq!(client.pool(&asset3).providers, 1);
+}
+
+#[test]
 fn test_provide_liquidity_multi_rejects_unregistered_anchor() {
     let env = Env::default();
     env.mock_all_auths();
