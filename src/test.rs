@@ -301,6 +301,58 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
+fn test_pause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+
+    // `events().all()` reflects only the most recent top-level invocation,
+    // so calling pause in isolation lets us assert its exact event output.
+    client.pause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                true.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_unpause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    client.pause(&admin);
+
+    // Call unpause in isolation so events().all() reflects only unpause.
+    client.unpause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                false.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn test_paused_blocks_provide_and_withdraw() {
     let env = Env::default();
     let (client, admin, anchor, asset) = funded(&env, 1_000);
@@ -1941,6 +1993,64 @@ fn test_cancel_expired_settlement_rejects_double_reclaim() {
 }
 
 #[test]
+fn test_cancel_settlement_and_expired_race_cancel_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_settlement (anchor-authorized) wins the race.
+    client.cancel_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Cancelled);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_expired_settlement sees Cancelled != Pending and rejects.
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_cancel_expired_and_settlement_race_expired_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_expired_settlement (permissionless) wins the race.
+    client.cancel_expired_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_settlement sees Expired != Pending and rejects.
+    let err = client
+        .try_cancel_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
 fn test_max_settlement_amount_disabled_by_default() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
@@ -2579,4 +2689,356 @@ fn full_withdraw_still_decrements_providers() {
 
     client.withdraw_liquidity(&a, &usdc, &1_000);
     assert_eq!(client.pool(&usdc).providers, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Pagination edge-case regression tests – issue #96
+//
+// Each list_* entrypoint is exercised for three edge-cases:
+//   1. start past the end  → must return an empty vec, not panic
+//   2. limit = 0           → must return an empty vec, not panic
+//   3. limit > remaining   → must return exactly the remaining items, not panic
+// ---------------------------------------------------------------------------
+
+// --- list_anchors ---
+
+#[test]
+fn test_list_anchors_start_past_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+
+    // There are 2 anchors at indices 0 and 1; starting at index 2 is past end.
+    assert_eq!(client.list_anchors(&2, &10).len(), 0);
+    // Far-past-end with a u32 near its maximum should also be safe.
+    assert_eq!(client.list_anchors(&u32::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_anchors_limit_zero_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+
+    assert_eq!(client.list_anchors(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_anchors_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+
+    // Ask for 1000 but only 2 are registered; must get exactly 2.
+    let result = client.list_anchors(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    // Verify they are the same anchors in order.
+    assert_eq!(result.get(0).unwrap(), a1);
+    assert_eq!(result.get(1).unwrap(), a2);
+}
+
+// --- list_assets ---
+
+#[test]
+fn test_list_assets_start_past_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &100);
+    client.provide_liquidity(&anchor, &eurc, &100);
+
+    // 2 assets at indices 0 and 1; starting at index 2 is past end.
+    assert_eq!(client.list_assets(&2, &10).len(), 0);
+    assert_eq!(client.list_assets(&u32::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_assets_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    assert_eq!(client.list_assets(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_assets_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &100);
+    client.provide_liquidity(&anchor, &eurc, &100);
+
+    let result = client.list_assets(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap(), usdc);
+    assert_eq!(result.get(1).unwrap(), eurc);
+}
+
+// --- list_fee_waived_anchors ---
+
+#[test]
+fn test_list_fee_waived_anchors_start_past_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+
+    // The anchor list has 2 entries (indices 0 and 1); starting at index 2 is past end.
+    assert_eq!(client.list_fee_waived_anchors(&2, &10).len(), 0);
+    assert_eq!(client.list_fee_waived_anchors(&u32::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_fee_waived_anchors_limit_zero_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.set_fee_waiver(&anchor, &true);
+
+    assert_eq!(client.list_fee_waived_anchors(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_fee_waived_anchors_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+
+    let result = client.list_fee_waived_anchors(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap(), a1);
+    assert_eq!(result.get(1).unwrap(), a2);
+}
+
+// --- list_settlements ---
+
+#[test]
+fn test_list_settlements_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+    // 2 settlements with ids 1 and 2; starting at id 3 is past end.
+    assert_eq!(client.list_settlements(&3, &10).len(), 0);
+    assert_eq!(client.list_settlements(&u64::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements(&1, &0).len(), 0);
+    // start=0 normalises to id 1 internally; limit=0 should still return empty.
+    assert_eq!(client.list_settlements(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements(&1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_anchor ---
+
+#[test]
+fn test_list_settlements_by_anchor_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client.list_settlements_by_anchor(&anchor, &3, &10).len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_anchor_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client.list_settlements_by_anchor(&anchor, &1, &0).len(),
+        0
+    );
+    assert_eq!(
+        client.list_settlements_by_anchor(&anchor, &0, &0).len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_anchor_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_anchor(&anchor, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_asset ---
+
+#[test]
+fn test_list_settlements_by_asset_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_asset(&asset, &3, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_asset_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_asset(&asset, &1, &0).len(), 0);
+    assert_eq!(client.list_settlements_by_asset(&asset, &0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_by_asset_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_asset(&asset, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_status ---
+
+#[test]
+fn test_list_settlements_by_status_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &3, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_status_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &1, &0)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &0, &0)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_status_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_status(&SettlementStatus::Pending, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- hello (smoke test that setup still works after all new tests) ---
+
+#[test]
+fn test_hello() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+    assert!(client.is_initialized());
 }
