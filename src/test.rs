@@ -636,6 +636,216 @@ proptest! {
     }
 }
 
+/// Tracks a single settlement's state within the proptest below.
+#[derive(Clone)]
+struct SettlementState {
+    provider_idx: usize,
+    asset_idx: usize,
+    amount: i128,
+    opened_at: u32,
+    status: SettlementStatus,
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// Verifies that `total_liquidity_all()` matches an independently tracked
+    /// expected total through a long randomised sequence of liquidity and
+    /// settlement operations across two assets and two providers.
+    ///
+    /// The invariant:
+    /// - `provide_liquidity`              → expected_total += amount
+    /// - `withdraw_liquidity`             → expected_total -= amount
+    /// - `withdraw_all_liquidity`         → expected_total -= provider's balance
+    /// - `open_settlement`                → expected_total -= amount
+    /// - `cancel_settlement`              → expected_total += settlement.amount
+    /// - `cancel_expired_settlement`      → expected_total += settlement.amount
+    /// - `execute_settlement`             → expected_total unchanged
+    ///
+    /// A failed call (precondition not met) is silently skipped; the invariant
+    /// is checked only after each *successful* operation.
+    #[test]
+    fn prop_total_liquidity_all_matches_expected(
+        ops in prop::collection::vec(
+            (0..7u32, 0..2u32, 0..2u32, 1..=10_000i128),
+            1..=200,
+        ),
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let assets = [symbol_short!("USDC"), symbol_short!("EURC")];
+        let providers = [
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        client.initialize(&admin);
+        for p in &providers {
+            client.register_anchor(p);
+        }
+        // Short expiry so cancel_expired_settlement is reachable.
+        client.set_settlement_expiry_ledgers(&10);
+
+        // Indepedently tracked model of on-chain state.
+        let mut expected_total: i128 = 0;
+        let mut balances = [[0i128; 2]; 2];
+        let mut pool_totals = [0i128; 2];
+        let mut settlements: Vec<SettlementState> = Vec::new();
+        let mut ledger_seq: u32 = 100;
+
+        env.ledger().set_sequence_number(ledger_seq);
+
+        for (kind, pi, ai, amt) in ops {
+            let (pi, ai) = (pi as usize % 2, ai as usize % 2);
+
+            let executed = match kind % 7 {
+                0 => {
+                    if let Ok(Ok(())) =
+                        client.try_provide_liquidity(&providers[pi], &assets[ai], &amt)
+                    {
+                        balances[pi][ai] += amt;
+                        pool_totals[ai] += amt;
+                        expected_total += amt;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                1 => {
+                    if balances[pi][ai] >= amt {
+                        if let Ok(Ok(())) =
+                            client.try_withdraw_liquidity(&providers[pi], &assets[ai], &amt)
+                        {
+                            balances[pi][ai] -= amt;
+                            pool_totals[ai] -= amt;
+                            expected_total -= amt;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                2 => {
+                    let bal = balances[pi][ai];
+                    if bal > 0 {
+                        if let Ok(Ok(_)) =
+                            client.try_withdraw_all_liquidity(&providers[pi], &assets[ai])
+                        {
+                            balances[pi][ai] = 0;
+                            pool_totals[ai] -= bal;
+                            expected_total -= bal;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                3 => {
+                    if pool_totals[ai] >= amt {
+                        if let Ok(Ok(_id)) =
+                            client.try_open_settlement(&providers[pi], &assets[ai], &amt)
+                        {
+                            pool_totals[ai] -= amt;
+                            expected_total -= amt;
+                            settlements.push(SettlementState {
+                                provider_idx: pi,
+                                asset_idx: ai,
+                                amount: amt,
+                                opened_at: ledger_seq,
+                                status: SettlementStatus::Pending,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                4 => {
+                    let pending: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if pending.is_empty() {
+                        false
+                    } else {
+                        let idx = pending[amt as usize % pending.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_cancel_settlement(&id) {
+                            let s = &mut settlements[idx];
+                            s.status = SettlementStatus::Cancelled;
+                            pool_totals[s.asset_idx] += s.amount;
+                            expected_total += s.amount;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                5 => {
+                    let pending: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if pending.is_empty() {
+                        false
+                    } else {
+                        let idx = pending[amt as usize % pending.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_execute_settlement(&id) {
+                            settlements[idx].status = SettlementStatus::Executed;
+                            // expected_total unchanged
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                _ => {
+                    let expired: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| {
+                            s.status == SettlementStatus::Pending
+                                && ledger_seq >= s.opened_at + 10
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if expired.is_empty() {
+                        false
+                    } else {
+                        let idx = expired[amt as usize % expired.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_cancel_expired_settlement(&id) {
+                            let s = &mut settlements[idx];
+                            s.status = SettlementStatus::Expired;
+                            pool_totals[s.asset_idx] += s.amount;
+                            expected_total += s.amount;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            };
+
+            if executed {
+                prop_assert_eq!(client.total_liquidity_all(), expected_total);
+            }
+
+            ledger_seq += 1;
+            env.ledger().set_sequence_number(ledger_seq);
+        }
+    }
+}
+
 #[test]
 fn test_zero_fee_when_unset() {
     let env = Env::default();
