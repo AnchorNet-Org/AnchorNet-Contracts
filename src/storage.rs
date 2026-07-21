@@ -224,15 +224,17 @@ pub fn get_asset_list(env: &Env) -> Vec<Symbol> {
 }
 
 /// Appends `asset` to the asset list if it is not already present.
-pub fn remember_asset(env: &Env, asset: &Symbol) {
+pub fn remember_asset(env: &Env, asset: &Symbol) -> bool {
     let mut list = get_asset_list(env);
     if list.contains(asset) {
-        return;
+        false
+    } else {
+        list.push_back(asset.clone());
+        let key = DataKey::AssetList;
+        env.storage().persistent().set(&key, &list);
+        extend(env, &key);
+        true
     }
-    list.push_back(asset.clone());
-    let key = DataKey::AssetList;
-    env.storage().persistent().set(&key, &list);
-    extend(env, &key);
 }
 
 /// Reads the [`Pool`] for `asset`, returning an empty pool if none exists.
