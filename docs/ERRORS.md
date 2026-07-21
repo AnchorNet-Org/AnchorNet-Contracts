@@ -36,6 +36,7 @@ listed here.
 | 18 | `NoOperator` | No lifecycle operator has been appointed. | `operator` |
 | 19 | `AboveMaxSettlementAmount` | The requested settlement amount exceeds the enabled per-asset maximum settlement amount. | `open_settlement` |
 | 20 | `DuplicateAssetInBatch` | The same asset appears more than once in a batch liquidity operation. | `provide_liquidity_multi`<br>`withdraw_liquidity_multi` |
+| 21 | `InvalidAdminCandidate` | The proposed administrator is the same as the current administrator. | `propose_admin` |
 
 ## Maintaining this reference
 

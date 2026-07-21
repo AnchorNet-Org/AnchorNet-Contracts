@@ -33,6 +33,7 @@ cargo test
 - `src/lib.rs` – contract entrypoint and public interface
 - `src/error.rs` – error codes returned to clients
 - [`docs/ERRORS.md`](docs/ERRORS.md) – stable error-code reference and originating entrypoints
+- [`docs/PAGINATION.md`](docs/PAGINATION.md) – stable pagination semantics reference and worked examples
 - `src/types.rs` – on-chain data types (`Pool`)
 - `src/storage.rs` – storage keys and TTL-aware accessors
 - `src/events.rs` – event publishing helpers
@@ -98,7 +99,14 @@ state.
 | `set_fee_waiver(anchor, waived)` | admin | Grant or revoke a fee waiver for a registered anchor |
 | `is_fee_waived(anchor)` | – | Check whether an anchor is exempt from settlement fees |
 | `list_fee_waived_anchors(start, limit)` | – | Page through currently registered anchors with an active fee waiver |
+| `fee_waived_anchor_count()` | – | Read the number of currently registered anchors with an active fee waiver |
 | `version()` | – | Read the contract interface version |
+
+Fee calculations intentionally use floor division:
+`floor(amount * bps / 10_000)`. As a result, tiny settlements can have a
+zero fee even when the configured rate is nonzero. For example, at 1 bps,
+amounts below 10,000 quote and accrue a fee of 0, while an amount of 10,000
+produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
 
 ### Settlement
 
@@ -140,7 +148,7 @@ setting.
 - `("anchor", anchor)` / `("deanchor", anchor)` – anchor registered / removed
 - `("provide", provider, asset)` – liquidity provided
 - `("withdraw", provider, asset)` – liquidity withdrawn
-- `("paused",)` – paused flag changed
+- `("paused",)` – paused flag changed; data is `true` when pausing, `false` when unpausing
 - `("fee",)` – protocol fee changed
 - `("waiver", anchor)` – anchor fee waiver granted or revoked
 - `("settle", anchor, asset)` – settlement opened

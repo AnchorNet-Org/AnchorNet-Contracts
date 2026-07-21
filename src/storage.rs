@@ -35,6 +35,8 @@ pub enum DataKey {
     Settlement(u64),
     /// Protocol fees accrued (and not yet collected) for an asset.
     FeesAccrued(Symbol),
+    /// Forgone protocol fee revenue due to waivers.
+    WaivedFeeVolume(Symbol),
     /// Ordered list of every address ever registered as an anchor.
     AnchorList,
     /// The address proposed to become the next administrator, if any.
@@ -390,6 +392,19 @@ pub fn get_fees_accrued(env: &Env, asset: &Symbol) -> i128 {
 /// Persists the accrued protocol fees for `asset`.
 pub fn set_fees_accrued(env: &Env, asset: &Symbol, amount: i128) {
     let key = DataKey::FeesAccrued(asset.clone());
+    env.storage().persistent().set(&key, &amount);
+    extend(env, &key);
+}
+
+/// Reads the forgone protocol fee volume for `asset`.
+pub fn get_waived_fee_volume(env: &Env, asset: &Symbol) -> i128 {
+    let key = DataKey::WaivedFeeVolume(asset.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Persists the forgone protocol fee volume for `asset`.
+pub fn set_waived_fee_volume(env: &Env, asset: &Symbol, amount: i128) {
+    let key = DataKey::WaivedFeeVolume(asset.clone());
     env.storage().persistent().set(&key, &amount);
     extend(env, &key);
 }
