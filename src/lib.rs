@@ -263,6 +263,17 @@ impl AnchornetContract {
     /// it can be reclaimed via
     /// [`cancel_expired_settlement`](Self::cancel_expired_settlement). A
     /// value of zero (the default) disables expiry entirely. Admin only.
+    ///
+    /// # Live-read vs. frozen-at-open
+    ///
+    /// Unlike the settlement fee — which is computed and stored on the
+    /// [`Settlement`](crate::types::Settlement) record at
+    /// [`open_settlement`](Self::open_settlement) time and never changes —
+    /// the expiry window is **read live** from storage on every call to
+    /// [`cancel_expired_settlement`](Self::cancel_expired_settlement) and
+    /// [`is_settlement_expired`](Self::is_settlement_expired). Changing this
+    /// value retroactively affects **all pending settlements**, shortening or
+    /// lengthening their effective lifetime.
     pub fn set_settlement_expiry_ledgers(env: Env, ledgers: u32) -> Result<(), Error> {
         Self::require_admin(&env)?;
         storage::set_settlement_expiry_ledgers(&env, ledgers);
@@ -711,6 +722,18 @@ impl AnchornetContract {
     /// is disabled (zero) or the window has not yet elapsed, and with
     /// [`Error::InvalidSettlementState`] if the settlement is not
     /// [`SettlementStatus::Pending`].
+    ///
+    /// # Live-read expiry window
+    ///
+    /// Unlike the settlement fee — which is computed and stored on the
+    /// [`Settlement`](crate::types::Settlement) record at
+    /// [`open_settlement`](Self::open_settlement) time and never changes —
+    /// the expiry window is **read live** from storage on every invocation.
+    /// Changing [`set_settlement_expiry_ledgers`](Self::set_settlement_expiry_ledgers)
+    /// after a settlement is opened retroactively affects when it becomes
+    /// reclaimable. This is intentional: shortening the window serves as an
+    /// emergency liquidity-recovery valve, while lengthening it prevents
+    /// premature sweeps.
     pub fn cancel_expired_settlement(env: Env, id: u64) -> Result<(), Error> {
         let mut settlement = storage::get_settlement(&env, id).ok_or(Error::SettlementNotFound)?;
         if settlement.status != SettlementStatus::Pending {

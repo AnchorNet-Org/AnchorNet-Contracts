@@ -1594,6 +1594,65 @@ fn test_cancel_expired_settlement_rejects_unknown_id() {
 }
 
 #[test]
+fn test_expiry_window_shortened_after_open_makes_settlement_reclaimable_earlier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open a settlement under a 50-ledger window.
+    client.set_settlement_expiry_ledgers(&50);
+    let id = client.open_settlement(&anchor, &asset, &400); // opened_at == 0
+
+    // Advance one ledger before original expiry — still not expired.
+    env.ledger().set_sequence_number(49);
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotExpired);
+
+    // Shorten the window retroactively.
+    client.set_settlement_expiry_ledgers(&30);
+
+    // Now at ledger 49, the settlement IS expired (opened_at 0 + 30 ≤ 49).
+    client.cancel_expired_settlement(&id);
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_expiry_window_lengthened_after_open_delays_reclaimability() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open a settlement under a 10-ledger window.
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400); // opened_at == 0
+
+    // Lengthen the window before original expiry.
+    client.set_settlement_expiry_ledgers(&50);
+
+    // At ledger 10 the settlement was opened at ledger 0 and the window is
+    // now 50, so 10 < 50 — not yet expired despite being past the original
+    // window.
+    env.ledger().set_sequence_number(10);
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotExpired);
+
+    // At ledger 50 the settlement finally expires.
+    env.ledger().set_sequence_number(50);
+    client.cancel_expired_settlement(&id);
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
 fn test_list_fee_waived_anchors_filters_non_waived() {
     let env = Env::default();
     env.mock_all_auths();
