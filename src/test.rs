@@ -2,9 +2,33 @@ use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus}
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _},
+    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     vec, Address, Env, IntoVal, Symbol,
 };
+
+macro_rules! assert_operator_rejected {
+    ($env:ident, $client:ident, $operator:ident, $fn_name:literal, $args:expr, $call:expr) => {{
+        $env.set_auths(&[MockAuth {
+            address: &$operator,
+            invoke: &MockAuthInvoke {
+                contract: &$client.address,
+                fn_name: $fn_name,
+                args: $args.into_val(&$env),
+                sub_invokes: &[],
+            },
+        }
+        .into()]);
+
+        let failure = $call
+            .err()
+            .expect(concat!($fn_name, " unexpectedly accepted the operator"));
+        assert!(
+            failure.is_err(),
+            "{} reached contract logic instead of rejecting operator authorization",
+            $fn_name
+        );
+    }};
+}
 
 fn setup(env: &Env) -> (AnchornetContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, AnchornetContract);
@@ -1652,22 +1676,154 @@ fn test_stranger_cannot_pause() {
 }
 
 #[test]
-#[should_panic]
-fn test_operator_cannot_set_fee() {
+fn test_operator_is_rejected_by_every_strictly_admin_only_entrypoint() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     let operator = Address::generate(&env);
+    let anchor = Address::generate(&env);
+    let candidate = Address::generate(&env);
+    let replacement_operator = Address::generate(&env);
+    let new_anchor = Address::generate(&env);
+    let batch_anchor_one = Address::generate(&env);
+    let batch_anchor_two = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
     client.initialize(&admin);
     client.set_operator(&operator);
+    client.register_anchor(&anchor);
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &100);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+    let executed_id = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&executed_id);
+    let pending_id = client.open_settlement(&anchor, &asset, &100);
 
-    // The operator role only extends to pause/unpause; admin-only mutations
-    // like `set_fee` still require the real admin's own signature, which is
-    // unaffected by an operator being appointed. With every mocked auth
-    // cleared, `set_fee` has no way to authenticate and must panic rather
-    // than let the operator (or anyone else) stand in for the admin.
-    env.set_auths(&[]);
-    client.set_fee(&25);
+    // Each call supplies valid state and arguments so an authorization change
+    // cannot be hidden by a later validation error. Strict admin checks ask
+    // for the admin's signature, so presenting only the appointed operator's
+    // exact invocation must produce a host auth failure, not a contract error.
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_admin",
+        (candidate.clone(),),
+        client.try_set_admin(&candidate)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "propose_admin",
+        (candidate.clone(),),
+        client.try_propose_admin(&candidate)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_operator",
+        (replacement_operator.clone(),),
+        client.try_set_operator(&replacement_operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_fee",
+        (25_u32,),
+        client.try_set_fee(&25)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_fee_waiver",
+        (anchor.clone(), true),
+        client.try_set_fee_waiver(&anchor, &true)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_asset_fee",
+        (asset.clone(), 50_u32),
+        client.try_set_asset_fee(&asset, &50)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "clear_asset_fee",
+        (asset.clone(),),
+        client.try_clear_asset_fee(&asset)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_settlement_expiry_ledgers",
+        (100_u32,),
+        client.try_set_settlement_expiry_ledgers(&100)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "collect_fees",
+        (asset.clone(),),
+        client.try_collect_fees(&asset)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "register_anchor",
+        (new_anchor.clone(),),
+        client.try_register_anchor(&new_anchor)
+    );
+    let batch = vec![&env, batch_anchor_one.clone(), batch_anchor_two.clone()];
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "register_anchors",
+        (batch.clone(),),
+        client.try_register_anchors(&batch)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "deregister_anchor",
+        (anchor.clone(),),
+        client.try_deregister_anchor(&anchor)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_min_liquidity",
+        (asset.clone(), 10_i128),
+        client.try_set_min_liquidity(&asset, &10)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_max_settlement_amount",
+        (asset.clone(), 500_i128),
+        client.try_set_max_settlement_amount(&asset, &500)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "execute_settlement",
+        (pending_id,),
+        client.try_execute_settlement(&pending_id)
+    );
 }
 
 #[test]
