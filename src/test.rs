@@ -1251,6 +1251,21 @@ fn test_propose_admin_overwrites_prior_proposal() {
 }
 
 #[test]
+fn test_propose_admin_rejects_current_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    let err = client.try_propose_admin(&admin).err().unwrap().unwrap();
+
+    assert_eq!(err, Error::InvalidAdminCandidate);
+    // No pending admin was set.
+    let err = client.try_pending_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoPendingAdmin);
+}
+
+#[test]
 fn test_pending_admin_unset_by_default() {
     let env = Env::default();
     let (client, admin) = setup(&env);
@@ -3859,6 +3874,125 @@ fn test_list_settlements_by_status_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.len(), 2);
     assert_eq!(result.get(0).unwrap().id, id1);
     assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// ---------------------------------------------------------------------------
+// Property-based tests for settlement aggregate consistency
+//
+// Randomized sequences of open/execute/cancel/expire operations across
+// multiple anchors and assets must not cause total_settled_amount or
+// settlement_count_by_status to drift from the ground truth produced by
+// scanning list_settlements.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_settlement_aggregates_survive_randomized_lifecycles(
+        plan in prop::collection::vec(
+            (
+                0u32..4,           // anchor_idx
+                0u32..4,           // asset_idx
+                1i128..251i128,    // amount
+                0u32..4u32,        // action: 0=Pending, 1=Execute, 2=Cancel, 3=Expire
+            ),
+            1..12,
+        ),
+        shuffle_seed in prop::num::u64::ANY,
+    ) {
+        use SettlementStatus::*;
+
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let anchrs: Vec<Address> = (0..4).map(|_| Address::generate(&env)).collect();
+        let assets = [
+            symbol_short!("USDC"),
+            symbol_short!("EURC"),
+            symbol_short!("GBPC"),
+            symbol_short!("XLM"),
+        ];
+
+        client.initialize(&admin);
+
+        for a in &anchrs {
+            client.register_anchor(a);
+            for s in &assets {
+                client.provide_liquidity(a, s, &1_000_000);
+            }
+        }
+
+        client.set_fee(&50);
+        client.set_settlement_expiry_ledgers(&10_000);
+
+        let mut ops: Vec<(u64, u32)> = Vec::new();
+
+        for (ai, si, amount, action) in plan {
+            let anchor = &anchrs[ai as usize % anchrs.len()];
+            let asset = &assets[si as usize % assets.len()];
+            let id = client.open_settlement(anchor, asset, &amount);
+            if action != 0 {
+                ops.push((id, action));
+            }
+        }
+
+        // Fisher-Yates shuffle using the seed for deterministic interleaving
+        let mut state = shuffle_seed;
+        for i in (1..ops.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let j = (state >> 33) as usize % (i + 1);
+            ops.swap(i, j);
+        }
+
+        if ops.iter().any(|(_, a)| *a == 3) {
+            env.ledger().set_sequence_number(20_000);
+        }
+
+        for (id, action) in &ops {
+            match action {
+                1 => client.execute_settlement(id),
+                2 => client.cancel_settlement(id),
+                3 => client.cancel_expired_settlement(id),
+                _ => unreachable!(),
+            }
+        }
+
+        // Ground truth: manually count and sum from every stored settlement
+        let all = client.list_settlements(&1, &u32::MAX);
+        let mut manual_counts = [0u64; 4];
+        let mut manual_amounts = [0i128; 4];
+
+        for s in all.iter() {
+            let idx = match s.status {
+                Pending => 0,
+                Executed => 1,
+                Cancelled => 2,
+                Expired => 3,
+            };
+            manual_counts[idx] += 1;
+            manual_amounts[idx] += s.amount;
+        }
+
+        let statuses = [Pending, Executed, Cancelled, Expired];
+        for (i, status) in statuses.iter().enumerate() {
+            prop_assert_eq!(
+                client.settlement_count_by_status(status),
+                manual_counts[i],
+                "settlement_count_by_status mismatch for {:?}",
+                status,
+            );
+            prop_assert_eq!(
+                client.total_settled_amount(status),
+                manual_amounts[i],
+                "total_settled_amount mismatch for {:?}",
+                status,
+            );
+        }
+    }
 }
 
 // --- hello (smoke test that setup still works after all new tests) ---

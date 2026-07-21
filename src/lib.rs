@@ -80,8 +80,15 @@ impl AnchornetContract {
     /// [`accept_admin`](Self::accept_admin), a safer two-step alternative to
     /// [`set_admin`](Self::set_admin) that guards against transferring
     /// control to an unreachable or mistyped address.
+    ///
+    /// Returns [`Error::InvalidAdminCandidate`] if `candidate` is the same as
+    /// the current administrator, since a no-op proposal would produce events
+    /// with no actual authority change.
     pub fn propose_admin(env: Env, candidate: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
+        if candidate == storage::get_admin(&env) {
+            return Err(Error::InvalidAdminCandidate);
+        }
         storage::set_pending_admin(&env, &candidate);
         events::admin_proposed(&env, &candidate);
         Ok(())
