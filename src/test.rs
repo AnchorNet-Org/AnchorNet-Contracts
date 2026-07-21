@@ -1,8 +1,12 @@
+use crate::storage::DataKey;
 use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus, BPS_DENOMINATOR};
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
+    testutils::{
+        storage::Persistent as _, Address as _, EnvTestConfig, Events as _, Ledger as _, MockAuth,
+        MockAuthInvoke,
+    },
     vec, Address, Env, IntoVal, Symbol,
 };
 
@@ -4003,4 +4007,155 @@ fn test_hello() {
     let (client, admin) = setup(&env);
     client.initialize(&admin);
     assert!(client.is_initialized());
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// TTL bump-on-read tests for the risk/fee configuration getters (issue
+// #122). Each configuration getter now extends its entry's TTL on a
+// successful read, matching what its setter already does. Only the three
+// getters this issue names are covered — the sibling read-side TTL gaps in
+// get_balance / is_fee_waived / get_fees_accrued belong to their own issues.
+//
+// Strategy: configure the value, advance the ledger far enough that the
+// entry's TTL decays below the extend threshold, snapshot the TTL, read via
+// the public getter, and confirm the read refreshed the TTL. Without the
+// fix the getter is a pure read and the TTL is unchanged, so `after > before`
+// fails; with the fix it bumps back up.
+// ──────────────────────────────────────────────────────────────────────
+
+// The setter bumps TTL to BUMP_AMOUNT (30 * DAY_IN_LEDGERS) and the extend
+// threshold is one DAY_IN_LEDGERS (17_280) below that. Advancing past that
+// window guarantees the next read actually triggers `extend_ttl` rather than
+// being a no-op.
+const TTL_DECAY_LEDGERS: u32 = 20_000;
+
+fn advance_ledger(env: &Env, by: u32) {
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + by);
+}
+
+fn persistent_ttl(env: &Env, contract: &Address, key: &DataKey) -> u32 {
+    env.as_contract(contract, || env.storage().persistent().get_ttl(key))
+}
+
+#[test]
+fn test_min_liquidity_read_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_min_liquidity(&asset, &100);
+
+    let key = DataKey::MinLiquidity(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // Read-only call: no setter involved.
+    assert_eq!(client.min_liquidity(&asset), 100);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "min_liquidity read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_max_settlement_amount_read_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_max_settlement_amount(&asset, &5_000);
+
+    let key = DataKey::MaxSettlementAmount(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.max_settlement_amount(&asset), 5_000);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "max_settlement_amount read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_asset_fee_read_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_asset_fee(&asset, &50);
+
+    let key = DataKey::AssetFee(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.asset_fee(&asset), 50);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "asset_fee read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_min_liquidity_repeated_reads_keep_ttl_fresh() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_min_liquidity(&asset, &100);
+
+    let key = DataKey::MinLiquidity(asset.clone());
+
+    // Sustained "set once, read constantly" scenario from the issue's security
+    // notes: each read over an advancing ledger should refresh the TTL, so the
+    // entry never drifts toward archival.
+    for _ in 0..2 {
+        advance_ledger(&env, TTL_DECAY_LEDGERS);
+        let _ = client.min_liquidity(&asset);
+    }
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+    let _ = client.min_liquidity(&asset);
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "repeated reads did not keep TTL fresh: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_min_liquidity_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // Never configured: the `.has` guard must skip `extend_ttl` (which would
+    // panic on an absent key) and the getter must still return the default.
+    assert_eq!(client.min_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_asset_fee_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // No override configured: `get_asset_fee` returns `None` without trying to
+    // extend an absent entry, so the effective fee falls back to the global fee.
+    assert_eq!(client.asset_fee(&asset), client.fee());
 }

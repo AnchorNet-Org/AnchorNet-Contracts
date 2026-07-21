@@ -337,8 +337,17 @@ pub fn set_settlement_expiry_ledgers(env: &Env, ledgers: u32) {
 
 /// Reads the minimum liquidity floor configured for `asset` (zero, meaning
 /// disabled, if never configured).
+///
+/// Extends the entry's TTL on a successful read so that heavily-read,
+/// rarely-updated risk configuration cannot silently archive between writes
+/// (issue #122). The `.has` guard avoids calling `extend_ttl` on an entry that
+/// was never written, since the SDK requires the key to exist; unconfigured
+/// assets keep returning `0` untouched.
 pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::MinLiquidity(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
@@ -351,8 +360,15 @@ pub fn set_min_liquidity(env: &Env, asset: &Symbol, floor: i128) {
 
 /// Reads the maximum settlement amount configured for `asset` (zero, meaning
 /// disabled, if never configured).
+///
+/// Extends the entry's TTL on a successful read (see [`get_min_liquidity`] for
+/// rationale — issue #122). The `.has` guard leaves unconfigured assets
+/// returning `0` without touching storage.
 pub fn get_max_settlement_amount(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::MaxSettlementAmount(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
@@ -364,9 +380,18 @@ pub fn set_max_settlement_amount(env: &Env, asset: &Symbol, amount: i128) {
 }
 
 /// Reads the per-asset fee override for `asset`, if one has been configured.
+///
+/// Extends the entry's TTL on a successful read (issue #122): the fee override
+/// is looked up on every fee resolution while admins reconfigure it rarely, so
+/// a long read-only period should not let it archive. Returns `None` untouched
+/// when the override is absent — there is no entry to extend in that case.
 pub fn get_asset_fee(env: &Env, asset: &Symbol) -> Option<u32> {
     let key = DataKey::AssetFee(asset.clone());
-    env.storage().persistent().get(&key)
+    let value = env.storage().persistent().get(&key);
+    if value.is_some() {
+        extend(env, &key);
+    }
+    value
 }
 
 /// Persists a per-asset fee override for `asset`.
