@@ -2211,6 +2211,53 @@ fn test_fee_waiver_takes_precedence_over_asset_fee_override() {
 }
 
 #[test]
+fn test_quote_fee_parity_with_executed_accrual() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1% global
+
+    // --- global rate only: quote_fee must match settlement stamp and accrual ---
+    let amount = 10_000i128;
+    let quoted = client.quote_fee(&asset, &amount);
+    let id = client.open_settlement(&anchor, &asset, &amount);
+    let settlement = client.settlement(&id);
+    assert_eq!(
+        quoted, settlement.fee,
+        "quote_fee must equal settlement fee stamp under global rate"
+    );
+
+    let fees_before = client.fees_accrued(&asset);
+    client.execute_settlement(&id);
+    let fees_after = client.fees_accrued(&asset);
+    assert_eq!(
+        quoted,
+        fees_after - fees_before,
+        "quote_fee must equal fee accrued by execute_settlement under global rate"
+    );
+
+    // --- with asset_fee override: quote_fee must still match stamp and accrual ---
+    client.set_asset_fee(&asset, &500); // 5% override
+
+    let amount2 = 20_000i128;
+    let quoted2 = client.quote_fee(&asset, &amount2);
+    let id2 = client.open_settlement(&anchor, &asset, &amount2);
+    let settlement2 = client.settlement(&id2);
+    assert_eq!(
+        quoted2, settlement2.fee,
+        "quote_fee must equal settlement fee stamp under asset-fee override"
+    );
+
+    let fees_before2 = client.fees_accrued(&asset);
+    client.execute_settlement(&id2);
+    let fees_after2 = client.fees_accrued(&asset);
+    assert_eq!(
+        quoted2,
+        fees_after2 - fees_before2,
+        "quote_fee must equal fee accrued by execute_settlement under asset-fee override"
+    );
+}
+
+#[test]
 fn test_admin_can_extend_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
