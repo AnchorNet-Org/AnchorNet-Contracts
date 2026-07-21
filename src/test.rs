@@ -1948,8 +1948,7 @@ fn test_register_anchors_batch_failure_emits_zero_events() {
     client.register_anchor(&a1);
 
     let a2 = Address::generate(&env);
-    let _ = client
-        .try_register_anchors(&vec![&env, a2.clone(), a1.clone()]);
+    let _ = client.try_register_anchors(&vec![&env, a2.clone(), a1.clone()]);
 
     let events = env.events().all();
     assert_eq!(events, vec![&env]);
@@ -3268,7 +3267,7 @@ fn test_provide_liquidity_multi_tracks_providers_independently() {
     let asset1 = symbol_short!("AST1");
     let asset2 = symbol_short!("AST2");
     let asset3 = symbol_short!("AST3");
-    
+
     client.initialize(&admin);
     client.register_anchor(&anchor1);
     client.register_anchor(&anchor2);
