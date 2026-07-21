@@ -100,6 +100,12 @@ state.
 | `list_fee_waived_anchors(start, limit)` | – | Page through currently registered anchors with an active fee waiver |
 | `version()` | – | Read the contract interface version |
 
+Fee calculations intentionally use floor division:
+`floor(amount * bps / 10_000)`. As a result, tiny settlements can have a
+zero fee even when the configured rate is nonzero. For example, at 1 bps,
+amounts below 10,000 quote and accrue a fee of 0, while an amount of 10,000
+produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
+
 ### Settlement
 
 | Function | Auth | Description |

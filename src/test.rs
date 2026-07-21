@@ -1,4 +1,4 @@
-use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus};
+use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus, BPS_DENOMINATOR};
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
@@ -576,6 +576,39 @@ fn test_quote_fee_preview() {
 
     let err = client.try_quote_fee(&asset, &0).err().unwrap().unwrap();
     assert_eq!(err, Error::InvalidAmount);
+}
+
+#[test]
+fn test_quote_fee_floor_rounding_boundary() {
+    let env = fee_test_env();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    let bps = 1_u32;
+    let first_nonzero_amount = (BPS_DENOMINATOR + i128::from(bps) - 1) / i128::from(bps);
+
+    client.initialize(&admin);
+    client.set_fee(&bps);
+
+    assert_eq!(client.quote_fee(&asset, &(first_nonzero_amount - 1)), 0);
+    assert_eq!(client.quote_fee(&asset, &first_nonzero_amount), 1);
+}
+
+#[test]
+fn test_small_settlement_executes_without_accruing_truncated_fee() {
+    let env = fee_test_env();
+    let (client, _admin, anchor, asset) = funded(&env, BPS_DENOMINATOR);
+    client.set_fee(&1);
+
+    let amount = BPS_DENOMINATOR - 1;
+    let id = client.open_settlement(&anchor, &asset, &amount);
+
+    assert_eq!(client.settlement(&id).fee, 0);
+
+    client.execute_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Executed);
+    assert_eq!(client.fees_accrued(&asset), 0);
 }
 
 proptest! {
