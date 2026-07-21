@@ -27,10 +27,16 @@ pub fn initialized(env: &Env, admin: &Address) {
         .publish((symbol_short!("init"),), admin.clone());
 }
 
-/// Emitted when the administrator changes. Topics: `("admin",)`.
-pub fn admin_changed(env: &Env, new_admin: &Address) {
+/// Emitted when the administrator changes. Topics: `("admin", path)`, where
+/// `path` is `"direct"` for single-step transfers or `"accept"` for two-step proposals.
+pub fn admin_changed(env: &Env, new_admin: &Address, via_proposal: bool) {
+    let path = if via_proposal {
+        symbol_short!("accept")
+    } else {
+        symbol_short!("direct")
+    };
     env.events()
-        .publish((symbol_short!("admin"),), new_admin.clone());
+        .publish((symbol_short!("admin"), path), new_admin.clone());
 }
 
 /// Emitted when an admin transfer is proposed. Topics: `("propose",)`.

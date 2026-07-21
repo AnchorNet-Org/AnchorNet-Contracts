@@ -301,8 +301,78 @@ fn test_set_admin_emits_admin_changed_event() {
             &env,
             (
                 client.address.clone(),
-                (symbol_short!("admin"),).into_val(&env),
+                (symbol_short!("admin"), symbol_short!("direct")).into_val(&env),
                 new_admin.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_accept_admin_emits_admin_changed_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let candidate = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.propose_admin(&candidate);
+
+    client.accept_admin(&candidate);
+
+    // `events().all()` reflects the most recent top-level invocation, i.e.
+    // just the `accept_admin` call.
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("admin"), symbol_short!("accept")).into_val(&env),
+                candidate.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_admin_changed_provenance_parity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let admin2 = Address::generate(&env);
+    let admin3 = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // Single-step set_admin
+    client.set_admin(&admin2);
+    let direct_events = env.events().all();
+    assert_eq!(
+        direct_events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("admin"), symbol_short!("direct")).into_val(&env),
+                admin2.into_val(&env),
+            ),
+        ]
+    );
+
+    // Two-step propose + accept admin
+    client.propose_admin(&admin3);
+    client.accept_admin(&admin3);
+    let accept_events = env.events().all();
+    assert_eq!(
+        accept_events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("admin"), symbol_short!("accept")).into_val(&env),
+                admin3.into_val(&env),
             ),
         ]
     );
