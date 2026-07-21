@@ -1257,11 +1257,7 @@ fn test_propose_admin_rejects_current_admin() {
     let (client, admin) = setup(&env);
 
     client.initialize(&admin);
-    let err = client
-        .try_propose_admin(&admin)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_propose_admin(&admin).err().unwrap().unwrap();
 
     assert_eq!(err, Error::InvalidAdminCandidate);
     // No pending admin was set.
