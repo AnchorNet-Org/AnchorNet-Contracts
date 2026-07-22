@@ -118,6 +118,8 @@ produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
 | `cancel_expired_settlement(id)` | – | Reclaim a timed-out pending settlement's liquidity to the pool |
 | `set_settlement_expiry_ledgers(ledgers)` | admin | Set the ledger window after which a pending settlement may be reclaimed (0 disables) |
 | `settlement_expiry_ledgers()` | – | Read the settlement expiry window in ledgers |
+| `settlement_exists(id)` | – | Check whether a settlement exists |
+| `is_settlement_pending(id)` | – | Check whether a settlement exists and its status is `Pending` |
 | `is_settlement_expired(id)` | – | Check whether a pending settlement has passed the expiry window, without reclaiming it |
 | `settlement(id)` | – | Read a settlement record |
 | `settlement_count()` | – | Read the number of settlements |

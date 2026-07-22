@@ -913,6 +913,24 @@ impl AnchornetContract {
         storage::get_settlement(&env, id).is_some()
     }
 
+    /// Returns `true` if a settlement with `id` exists and its status is
+    /// [`SettlementStatus::Pending`]. Returns `false` (not an error) for a
+    /// missing id or any terminal-state settlement. Designed as a minimal-payload
+    /// primitive purpose-built for a keeper's hot polling path.
+    ///
+    /// Note the distinction from [`settlement_exists`](Self::settlement_exists)
+    /// (which returns true regardless of status), [`settlement`](Self::settlement)
+    /// (which errors on missing and returns the full struct), and
+    /// [`is_settlement_expired`](Self::is_settlement_expired) (which returns true
+    /// only if the settlement is pending AND past its expiry window).
+    pub fn is_settlement_pending(env: Env, id: u64) -> bool {
+        if let Some(settlement) = storage::get_settlement(&env, id) {
+            settlement.status == SettlementStatus::Pending
+        } else {
+            false
+        }
+    }
+
     /// Returns up to `limit` settlements starting at id `start` (inclusive).
     /// Ids are assigned sequentially from 1; missing ids are skipped.
     pub fn list_settlements(env: Env, start: u64, limit: u32) -> Vec<Settlement> {

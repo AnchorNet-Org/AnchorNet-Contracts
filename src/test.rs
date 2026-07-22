@@ -1189,6 +1189,37 @@ fn test_settlement_exists() {
 }
 
 #[test]
+fn test_is_settlement_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    client.set_settlement_expiry_ledgers(&10);
+
+    // Missing id
+    assert!(!client.is_settlement_pending(&1));
+
+    // Pending id
+    let id_pending = client.open_settlement(&anchor, &asset, &100);
+    assert!(client.is_settlement_pending(&id_pending));
+
+    // Executed
+    let id_exec = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&id_exec);
+    assert!(!client.is_settlement_pending(&id_exec));
+
+    // Cancelled
+    let id_cancel = client.open_settlement(&anchor, &asset, &100);
+    client.cancel_settlement(&id_cancel);
+    assert!(!client.is_settlement_pending(&id_cancel));
+
+    // Expired
+    let id_expire = client.open_settlement(&anchor, &asset, &100);
+    env.ledger().set_sequence_number(15);
+    client.cancel_expired_settlement(&id_expire);
+    assert!(!client.is_settlement_pending(&id_expire));
+}
+
+#[test]
 fn test_list_settlements_empty() {
     let env = Env::default();
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
