@@ -163,6 +163,9 @@ pub fn set_fee_bps(env: &Env, bps: u32) {
 /// Returns `true` if `anchor` has been registered.
 pub fn is_anchor(env: &Env, anchor: &Address) -> bool {
     let key = DataKey::Anchor(anchor.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 

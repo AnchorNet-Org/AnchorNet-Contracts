@@ -4228,6 +4228,25 @@ fn test_is_fee_waived_read_bumps_ttl() {
 }
 
 #[test]
+fn test_is_anchor_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+
+    let key = DataKey::Anchor(anchor.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // Read-only call: no setter involved.
+    assert!(client.is_anchor(&anchor));
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "is_anchor read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
 fn test_max_settlement_amount_read_bumps_ttl() {
     let env = Env::default();
     env.mock_all_auths();
