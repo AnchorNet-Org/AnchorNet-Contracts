@@ -3618,6 +3618,132 @@ fn full_withdraw_still_decrements_providers() {
 }
 
 // ---------------------------------------------------------------------------
+// pool.providers invariant under interleaved sequences – issue #128
+//
+// `providers_counter_survives_interleaved_provide_withdraw` above already walks
+// three anchors through partial/full withdrawals and a re-entry, but it asserts
+// against counts hardcoded per step, and every full exit in it goes through
+// `withdraw_liquidity` with an exact amount. The test below closes both gaps:
+//
+//   1. The expected count is never written down. It is derived on every
+//      checkpoint from a balance ledger the test maintains itself, so a step
+//      that is reordered, edited or inserted cannot silently keep passing
+//      against a stale literal.
+//   2. Full exits alternate between `withdraw_liquidity` with the exact
+//      remaining balance and `withdraw_all_liquidity`, which reaches the same
+//      decrement through a different entry point, and each provider re-enters
+//      after both kinds of exit.
+//
+// The tracked ledger is itself cross-checked against `balance()` at every step,
+// so it cannot drift away from the contract and validate a wrong expectation.
+// ---------------------------------------------------------------------------
+
+/// Asserts that `pool.providers` equals the number of anchors that `balances`
+/// records as currently holding liquidity, and that the tracked balances still
+/// agree with the contract's own view.
+fn assert_providers_match_ledger(
+    client: &AnchornetContractClient<'_>,
+    asset: &Symbol,
+    anchors: &[Address],
+    balances: &[i128],
+    step: &str,
+) {
+    for (i, expected) in balances.iter().enumerate() {
+        assert_eq!(
+            client.balance(&anchors[i], asset),
+            *expected,
+            "tracked balance for anchor {i} drifted from the contract after {step}",
+        );
+    }
+
+    let expected = balances.iter().filter(|b| **b > 0).count() as u32;
+    assert_eq!(
+        client.pool(asset).providers,
+        expected,
+        "pool.providers disagrees with the tracked active-provider count after {step}",
+    );
+}
+
+/// `pool.providers` must equal the number of anchors with a non-zero balance at
+/// every point of an interleaved sequence, no matter which entry point drove the
+/// change. Exercises partial withdrawals, full exits through both
+/// `withdraw_liquidity` and `withdraw_all_liquidity`, top-ups by an already
+/// active provider, and re-entries after each kind of exit (issue #128).
+#[test]
+fn providers_count_tracks_active_anchors_through_interleaved_sequence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    let anchors = [
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    ];
+    for anchor in &anchors {
+        client.register_anchor(anchor);
+    }
+
+    // The independently tracked ledger: index i mirrors anchors[i]'s balance.
+    let mut balances = [0i128; 3];
+
+    let provide = |balances: &mut [i128; 3], who: usize, amount: i128, step: &str| {
+        client.provide_liquidity(&anchors[who], &usdc, &amount);
+        balances[who] += amount;
+        assert_providers_match_ledger(&client, &usdc, &anchors, balances, step);
+    };
+
+    provide(&mut balances, 0, 1_000, "a provides its first liquidity");
+    provide(&mut balances, 1, 2_000, "b joins the pool");
+    provide(&mut balances, 2, 500, "c joins the pool");
+
+    // Partial withdrawal: a keeps a positive balance, so it stays a provider.
+    client.withdraw_liquidity(&anchors[0], &usdc, &300);
+    balances[0] -= 300;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "a partially withdraws");
+
+    // Full exit through withdraw_all_liquidity.
+    assert_eq!(client.withdraw_all_liquidity(&anchors[1], &usdc), 2_000);
+    balances[1] = 0;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "b exits with all");
+
+    // Top-up by an anchor that is already counted must not double-count it.
+    provide(&mut balances, 2, 250, "c tops up while already active");
+
+    // Full exit through withdraw_liquidity with the exact remaining balance.
+    client.withdraw_liquidity(&anchors[0], &usdc, &700);
+    balances[0] = 0;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "a exits exactly");
+
+    // Re-entry after a withdraw_all_liquidity exit must increment again.
+    provide(&mut balances, 1, 100, "b re-enters after withdrawing all");
+
+    // Re-entry after an exact-amount exit must increment again.
+    provide(&mut balances, 0, 50, "a re-enters after an exact exit");
+
+    // Drain the pool, alternating exit paths once more.
+    assert_eq!(client.withdraw_all_liquidity(&anchors[2], &usdc), 750);
+    balances[2] = 0;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "c exits with all");
+
+    client.withdraw_liquidity(&anchors[1], &usdc, &100);
+    balances[1] = 0;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "b exits exactly");
+
+    assert_eq!(client.withdraw_all_liquidity(&anchors[0], &usdc), 50);
+    balances[0] = 0;
+    assert_providers_match_ledger(&client, &usdc, &anchors, &balances, "a makes the last exit");
+
+    // The pool is empty again: the counter must be back at zero, not stuck.
+    assert_eq!(client.pool(&usdc).providers, 0);
+
+    // And it must still recover from an empty pool.
+    provide(&mut balances, 2, 10, "c reopens an emptied pool");
+}
+
+// ---------------------------------------------------------------------------
 // Pagination edge-case regression tests – issue #96
 //
 // Each list_* entrypoint is exercised for three edge-cases:
