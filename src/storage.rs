@@ -2,6 +2,28 @@
 //!
 //! All persistent entries use the `persistent` storage with a TTL that is
 //! extended on every read/write so that active pools are not archived.
+//!
+//! # Storage Buckets
+//!
+//! The contract uses two distinct Soroban storage buckets with independent TTL policies:
+//!
+//! - **Instance storage** (`env.storage().instance()`): Holds small, contract‑wide singleton configuration that is tightly coupled to the contract's code entry. These entries are not subject to per‑key TTL extensions and are expected to persist as long as the contract itself does.
+//!   - `Admin`
+//!   - `PendingAdmin`
+//!   - `Operator`
+//!   - `Paused`
+//!   - `FeeBps`
+//!   - `SettlementCount`
+//!   - `SettlementExpiryLedgers`
+//!
+//! - **Persistent storage** (`env.storage().persistent()`): Stores per‑key data that can be archived and restored independently. Each entry is automatically extended on read/write via `extend(env, &key)` using a TTL bump policy.
+//!   - `Anchor`, `Pool`, `Balance`, `Settlement`, `FeesAccrued`, `WaivedFeeVolume`, `AnchorList`, `AssetList`, `FeeWaiver`, `MinLiquidity`, `MaxSettlementAmount`, `AssetFee`
+//!
+//! # TTL Extension
+//!
+//! `extend_instance_ttl` only extends the lifetime of the **instance** bucket and does **not** affect any of the persistent entries. Persistent entries rely on their own per‑key `extend` calls, which are triggered by read/write traffic.
+//!
+//! This separation ensures that critical contract configuration remains available even if the contract code entry is archived, while large per‑asset data can be reclaimed when inactive.
 
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
