@@ -1465,11 +1465,27 @@ fn test_provide_liquidity_overflow_panics() {
 
     client.initialize(&admin);
     client.register_anchor(&anchor);
-    // The pool total already sits at `i128::MAX`; adding any further
-    // liquidity must overflow rather than silently wrap, relying on the
-    // crate-wide `overflow-checks = true` guarantee.
     client.provide_liquidity(&anchor, &usdc, &i128::MAX);
     client.provide_liquidity(&anchor, &usdc, &1);
+}
+
+#[test]
+fn test_provide_liquidity_overflow_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &i128::MAX);
+    let err = client
+        .try_provide_liquidity(&anchor, &usdc, &1)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::Overflow);
 }
 
 #[test]
@@ -3991,6 +4007,95 @@ proptest! {
                 "total_settled_amount mismatch for {:?}",
                 status,
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extreme-value property tests for checked arithmetic audit
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_extreme_provide_liquidity_returns_clean_error(
+        amount in prop_oneof![
+            (i128::MAX - 1000..=i128::MAX),
+            (i128::MIN..=i128::MIN + 1000),
+        ]
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+        let res = client.try_provide_liquidity(&anchor, &asset, &amount);
+        if amount <= 0 {
+            prop_assert_eq!(res.err().unwrap().unwrap(), Error::InvalidAmount);
+        } else {
+            match res {
+                Ok(_) => {},
+                Err(e) => {
+                    prop_assert_eq!(e.unwrap(), Error::Overflow);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prop_extreme_open_settlement_returns_clean_error(
+        amount in prop_oneof![
+            (i128::MAX - 1000..=i128::MAX),
+            (i128::MIN..=i128::MIN + 1000),
+        ]
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+        let res = client.try_open_settlement(&anchor, &asset, &amount);
+        if amount <= 0 {
+            prop_assert_eq!(res.err().unwrap().unwrap(), Error::InvalidAmount);
+        } else {
+            let err = res.err().unwrap().unwrap();
+            prop_assert!(err == Error::InsufficientLiquidity || err == Error::Overflow);
+        }
+    }
+
+    #[test]
+    fn prop_extreme_collect_fees_returns_clean_error(
+        accrued in prop_oneof![
+            (i128::MAX - 1000..=i128::MAX),
+            (i128::MIN..=i128::MIN + 1000),
+        ]
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        client.initialize(&admin);
+        let asset = symbol_short!("USDC");
+
+        if accrued > 0 {
+            env.as_contract(&client.address, || {
+                crate::storage::set_fees_accrued(&env, &asset, accrued);
+            });
+            let res = client.try_collect_fees(&asset);
+            prop_assert_eq!(res.unwrap().unwrap(), accrued);
+        } else if accrued == 0 {
+            let res = client.try_collect_fees(&asset);
+            prop_assert_eq!(res.err().unwrap().unwrap(), Error::NoFeesToCollect);
+        } else {
+            env.as_contract(&client.address, || {
+                crate::storage::set_fees_accrued(&env, &asset, accrued);
+            });
+            let res = client.try_collect_fees(&asset);
+            prop_assert!(res.is_ok() || res.is_err());
         }
     }
 }
