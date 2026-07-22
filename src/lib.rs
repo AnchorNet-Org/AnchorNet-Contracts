@@ -637,6 +637,31 @@ impl AnchornetContract {
     /// Opens a settlement that reserves `amount` of `asset` liquidity for the
     /// requesting `anchor`. The reserved amount leaves the available pool and a
     /// [`SettlementStatus::Pending`] record is created. Returns the new id.
+    ///
+    /// # Error surface vs [`pool`](Self::pool)
+    ///
+    /// Called with a positive amount on an asset that has never had liquidity
+    /// provided, this returns [`Error::InsufficientLiquidity`] — never
+    /// [`Error::PoolNotFound`]. The two entrypoints take different paths over
+    /// the same underlying state:
+    ///
+    /// - `open_settlement` fetches the pool with `storage::get_pool`, which
+    ///   materializes a zero-liquidity `Pool::empty(asset)` for a missing
+    ///   entry, so the `pool.total < amount` check below trips first for any
+    ///   positive amount.
+    /// - [`pool`](Self::pool) checks entry existence directly and returns
+    ///   [`Error::PoolNotFound`] for that same missing entry.
+    ///
+    /// Integrators must not assume the two agree: an
+    /// [`Error::InsufficientLiquidity`] here may mean the asset was never
+    /// funded at all, not merely that it is under-funded right now. Callers
+    /// that need to tell those apart should consult [`pool`](Self::pool).
+    ///
+    /// The divergence is a consequence of validation order, which is also
+    /// load-bearing for the error a caller sees: `amount <= 0` yields
+    /// [`Error::InvalidAmount`] and an unregistered anchor yields
+    /// [`Error::AnchorNotRegistered`], both *before* the pool is ever read.
+    /// Regression tests lock in all of this (see `test.rs`, issue #152).
     pub fn open_settlement(
         env: Env,
         anchor: Address,
