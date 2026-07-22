@@ -2556,6 +2556,31 @@ fn test_is_settlement_expired_false_while_disabled() {
 }
 
 #[test]
+fn test_settlement_expiry_disabled_at_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Explicitly set expiry to 0 (disabling it)
+    client.set_settlement_expiry_ledgers(&0);
+    let id = client.open_settlement(&anchor, &asset, &400);
+
+    // Advance the ledger sequence arbitrarily far in the future
+    env.ledger().set_sequence_number(1_000_000);
+
+    // Assert that is_settlement_expired reports false
+    assert!(!client.is_settlement_expired(&id));
+
+    // Assert that cancel_expired_settlement fails and returns SettlementNotExpired
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotExpired);
+}
+
+#[test]
 fn test_is_settlement_expired_false_before_boundary() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
