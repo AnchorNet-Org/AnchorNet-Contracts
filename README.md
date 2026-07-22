@@ -124,6 +124,7 @@ produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
 | `list_settlements(start, limit)` | – | Page through settlements |
 | `list_settlements_by_anchor(anchor, start, limit)` | – | Page through settlements opened by one anchor |
 | `list_settlements_by_asset(asset, start, limit)` | – | Page through settlements in one asset |
+| `list_settlements_by_anchor_and_asset(anchor, asset, start, limit)` | – | Page through settlements matching both anchor and asset |
 | `list_settlements_by_status(status, start, limit)` | – | Page through settlements in a given lifecycle state |
 | `settlement_count_by_status(status)` | – | Count every settlement in a given lifecycle state (no pagination) |
 | `total_settled_amount(status)` | – | Sum settled `amount` across every settlement in a given lifecycle state |
