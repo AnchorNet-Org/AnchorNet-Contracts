@@ -82,8 +82,8 @@ state.
 | Function | Auth | Description |
 |----------|------|-------------|
 | `pause(caller)` / `unpause(caller)` | admin or operator | Halt or resume liquidity & settlement mutations |
-| `is_paused()` | – | Read the paused flag |
 | `set_operator(operator)` | admin | Appoint an operator that may pause/unpause but cannot change fees or admin |
+| `clear_operator()` | admin | Revoke the operator role entirely |
 | `operator()` | – | Read the currently appointed operator |
 | `is_operator(address)` | – | Check whether an address is the currently appointed operator |
 | `extend_instance_ttl(caller)` | admin or operator | Extend the contract instance/code TTL so it survives long inactivity |
@@ -149,16 +149,17 @@ setting.
 - `("anchor", anchor)` / `("deanchor", anchor)` – anchor registered / removed
 - `("provide", provider, asset)` – liquidity provided
 - `("withdraw", provider, asset)` – liquidity withdrawn
-- `("paused",)` – paused flag changed; data is `true` when pausing, `false` when unpausing
-- `("fee",)` – protocol fee changed
+- `("paused",)` – paused flag flipped (data: `bool`)
+- `("fee",)` – fee rate changed (data: `u32` bps)
 - `("waiver", anchor)` – anchor fee waiver granted or revoked
 - `("settle", anchor, asset)` – settlement opened
 - `("executed", id)` / `("cancelled", id)` – settlement finalized / cancelled
 - `("expired", id)` – settlement reclaimed after timing out
 - `("expiry",)` – settlement expiry window changed
 - `("collect", asset)` – fees collected
-- `("minliq", asset)` – asset minimum liquidity floor changed
+- `("minliq", asset)` – minimum liquidity floor configured
 - `("operator",)` – operator appointed or replaced
+- `("op_clear",)` – operator role revoked
 
 ## Contract metadata
 

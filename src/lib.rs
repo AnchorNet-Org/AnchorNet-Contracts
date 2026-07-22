@@ -133,6 +133,16 @@ impl AnchornetContract {
         Ok(())
     }
 
+    /// Revokes the operator role, returning the contract to an operator-less
+    /// state where no address has delegated pause/unpause authority.
+    /// Admin only.
+    pub fn clear_operator(env: Env) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_operator(&env);
+        events::operator_cleared(&env);
+        Ok(())
+    }
+
     /// Returns the currently appointed operator, or [`Error::NoOperator`] if
     /// none has been appointed.
     pub fn operator(env: Env) -> Result<Address, Error> {

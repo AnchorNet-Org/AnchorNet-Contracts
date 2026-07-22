@@ -137,6 +137,11 @@ pub fn set_operator(env: &Env, operator: &Address) {
     env.storage().instance().set(&DataKey::Operator, operator);
 }
 
+/// Removes the operator address from instance storage.
+pub fn clear_operator(env: &Env) {
+    env.storage().instance().remove(&DataKey::Operator);
+}
+
 /// Returns `true` if the contract is currently paused.
 pub fn is_paused(env: &Env) -> bool {
     env.storage()

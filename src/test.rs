@@ -2194,6 +2194,39 @@ fn test_set_operator_updates_value() {
 }
 
 #[test]
+fn test_clear_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let operator = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.set_operator(&operator);
+    assert!(client.is_operator(&operator));
+
+    client.clear_operator();
+
+    let err = client.try_operator().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoOperator);
+    assert!(!client.is_operator(&operator));
+
+    assert_operator_rejected!(env, client, operator, "pause", (), client.try_pause(&operator));
+    assert_operator_rejected!(env, client, operator, "unpause", (), client.try_unpause(&operator));
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "extend_instance_ttl",
+        (),
+        client.try_extend_instance_ttl(&operator)
+    );
+    
+    // Admin can still act
+    client.pause(&admin);
+    assert!(client.is_paused());
+}
+
+#[test]
 fn test_operator_can_pause_and_unpause() {
     let env = Env::default();
     env.mock_all_auths();

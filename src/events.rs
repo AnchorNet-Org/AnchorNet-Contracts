@@ -137,6 +137,11 @@ pub fn operator_changed(env: &Env, operator: &Address) {
         .publish((symbol_short!("operator"),), operator.clone());
 }
 
+/// Emitted when the operator role is revoked. Topics: `("op_clear",)`.
+pub fn operator_cleared(env: &Env) {
+    env.events().publish((symbol_short!("op_clear"),), ());
+}
+
 /// Emitted when an asset's maximum settlement amount changes. Topics:
 /// `("maxamt", asset)`, data: `i128` amount.
 pub fn max_settlement_amount_changed(env: &Env, asset: &Symbol, amount: i128) {
