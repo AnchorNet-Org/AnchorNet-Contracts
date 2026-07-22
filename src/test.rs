@@ -2267,6 +2267,30 @@ fn test_admin_can_still_pause_with_operator_appointed() {
 }
 
 #[test]
+fn test_admin_appointed_as_operator_retains_both_roles() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let candidate = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.set_operator(&admin);
+
+    assert_eq!(client.operator(), admin);
+    assert!(client.is_operator(&admin));
+
+    // Operator-scoped actions still succeed
+    client.pause(&admin);
+    assert!(client.is_paused());
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+    client.extend_instance_ttl(&admin);
+
+    // Admin-only actions remain available (no NotAuthorized error)
+    client.propose_admin(&candidate);
+}
+
+#[test]
 fn test_stranger_cannot_pause() {
     let env = Env::default();
     env.mock_all_auths();

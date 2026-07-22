@@ -140,7 +140,8 @@ settlement has passed the configured expiry window.
 have no implicit sender) that must be either the admin or the appointed
 operator; the operator role is scoped to this one lifecycle switch and
 carries no ability to change the fee, the admin, or any other admin-only
-setting.
+setting. Note that appointing the admin as its own operator is a supported
+(if redundant) dual-role configuration.
 
 ### Events
 
