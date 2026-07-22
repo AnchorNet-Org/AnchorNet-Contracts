@@ -1,10 +1,38 @@
-use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus};
+use crate::storage::DataKey;
+use crate::{AnchornetContract, AnchornetContractClient, Error, SettlementStatus, BPS_DENOMINATOR};
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, EnvTestConfig, Events as _, Ledger as _},
+    testutils::{
+        storage::Persistent as _, Address as _, EnvTestConfig, Events as _, Ledger as _, MockAuth,
+        MockAuthInvoke,
+    },
     vec, Address, Env, IntoVal, Symbol,
 };
+
+macro_rules! assert_operator_rejected {
+    ($env:ident, $client:ident, $operator:ident, $fn_name:literal, $args:expr, $call:expr) => {{
+        $env.set_auths(&[MockAuth {
+            address: &$operator,
+            invoke: &MockAuthInvoke {
+                contract: &$client.address,
+                fn_name: $fn_name,
+                args: $args.into_val(&$env),
+                sub_invokes: &[],
+            },
+        }
+        .into()]);
+
+        let failure = $call
+            .err()
+            .expect(concat!($fn_name, " unexpectedly accepted the operator"));
+        assert!(
+            failure.is_err(),
+            "{} reached contract logic instead of rejecting operator authorization",
+            $fn_name
+        );
+    }};
+}
 
 fn setup(env: &Env) -> (AnchornetContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, AnchornetContract);
@@ -301,6 +329,58 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
+fn test_pause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+
+    // `events().all()` reflects only the most recent top-level invocation,
+    // so calling pause in isolation lets us assert its exact event output.
+    client.pause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                true.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_unpause_emits_paused_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    client.pause(&admin);
+
+    // Call unpause in isolation so events().all() reflects only unpause.
+    client.unpause(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("paused"),).into_val(&env),
+                false.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn test_paused_blocks_provide_and_withdraw() {
     let env = Env::default();
     let (client, admin, anchor, asset) = funded(&env, 1_000);
@@ -446,6 +526,41 @@ fn test_execute_twice_fails() {
 }
 
 #[test]
+fn test_execute_cancelled_settlement_fails() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    let id = client.open_settlement(&anchor, &asset, &400);
+    client.cancel_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Cancelled);
+    assert_eq!(client.fees_accrued(&asset), 0);
+
+    let err = client.try_execute_settlement(&id).err().unwrap().unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    assert_eq!(client.fees_accrued(&asset), 0);
+}
+
+#[test]
+fn test_execute_expired_settlement_fails() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+
+    env.ledger().set_sequence_number(10);
+    client.cancel_expired_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    assert_eq!(client.fees_accrued(&asset), 0);
+
+    let err = client.try_execute_settlement(&id).err().unwrap().unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    assert_eq!(client.fees_accrued(&asset), 0);
+}
+
+#[test]
 fn test_cancel_executed_fails() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
@@ -526,6 +641,39 @@ fn test_quote_fee_preview() {
     assert_eq!(err, Error::InvalidAmount);
 }
 
+#[test]
+fn test_quote_fee_floor_rounding_boundary() {
+    let env = fee_test_env();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    let bps = 1_u32;
+    let first_nonzero_amount = (BPS_DENOMINATOR + i128::from(bps) - 1) / i128::from(bps);
+
+    client.initialize(&admin);
+    client.set_fee(&bps);
+
+    assert_eq!(client.quote_fee(&asset, &(first_nonzero_amount - 1)), 0);
+    assert_eq!(client.quote_fee(&asset, &first_nonzero_amount), 1);
+}
+
+#[test]
+fn test_small_settlement_executes_without_accruing_truncated_fee() {
+    let env = fee_test_env();
+    let (client, _admin, anchor, asset) = funded(&env, BPS_DENOMINATOR);
+    client.set_fee(&1);
+
+    let amount = BPS_DENOMINATOR - 1;
+    let id = client.open_settlement(&anchor, &asset, &amount);
+
+    assert_eq!(client.settlement(&id).fee, 0);
+
+    client.execute_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Executed);
+    assert_eq!(client.fees_accrued(&asset), 0);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -581,6 +729,216 @@ proptest! {
         prop_assert!(lower_fee >= 0 && lower_fee <= lower_amount);
         prop_assert!(upper_fee >= 0 && upper_fee <= upper_amount);
         prop_assert!(lower_fee <= upper_fee);
+    }
+}
+
+/// Tracks a single settlement's state within the proptest below.
+#[derive(Clone)]
+struct SettlementState {
+    provider_idx: usize,
+    asset_idx: usize,
+    amount: i128,
+    opened_at: u32,
+    status: SettlementStatus,
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// Verifies that `total_liquidity_all()` matches an independently tracked
+    /// expected total through a long randomised sequence of liquidity and
+    /// settlement operations across two assets and two providers.
+    ///
+    /// The invariant:
+    /// - `provide_liquidity`              → expected_total += amount
+    /// - `withdraw_liquidity`             → expected_total -= amount
+    /// - `withdraw_all_liquidity`         → expected_total -= provider's balance
+    /// - `open_settlement`                → expected_total -= amount
+    /// - `cancel_settlement`              → expected_total += settlement.amount
+    /// - `cancel_expired_settlement`      → expected_total += settlement.amount
+    /// - `execute_settlement`             → expected_total unchanged
+    ///
+    /// A failed call (precondition not met) is silently skipped; the invariant
+    /// is checked only after each *successful* operation.
+    #[test]
+    fn prop_total_liquidity_all_matches_expected(
+        ops in prop::collection::vec(
+            (0..7u32, 0..2u32, 0..2u32, 1..=10_000i128),
+            1..=200,
+        ),
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let assets = [symbol_short!("USDC"), symbol_short!("EURC")];
+        let providers = [
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        client.initialize(&admin);
+        for p in &providers {
+            client.register_anchor(p);
+        }
+        // Short expiry so cancel_expired_settlement is reachable.
+        client.set_settlement_expiry_ledgers(&10);
+
+        // Indepedently tracked model of on-chain state.
+        let mut expected_total: i128 = 0;
+        let mut balances = [[0i128; 2]; 2];
+        let mut pool_totals = [0i128; 2];
+        let mut settlements: Vec<SettlementState> = Vec::new();
+        let mut ledger_seq: u32 = 100;
+
+        env.ledger().set_sequence_number(ledger_seq);
+
+        for (kind, pi, ai, amt) in ops {
+            let (pi, ai) = (pi as usize % 2, ai as usize % 2);
+
+            let executed = match kind % 7 {
+                0 => {
+                    if let Ok(Ok(())) =
+                        client.try_provide_liquidity(&providers[pi], &assets[ai], &amt)
+                    {
+                        balances[pi][ai] += amt;
+                        pool_totals[ai] += amt;
+                        expected_total += amt;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                1 => {
+                    if balances[pi][ai] >= amt {
+                        if let Ok(Ok(())) =
+                            client.try_withdraw_liquidity(&providers[pi], &assets[ai], &amt)
+                        {
+                            balances[pi][ai] -= amt;
+                            pool_totals[ai] -= amt;
+                            expected_total -= amt;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                2 => {
+                    let bal = balances[pi][ai];
+                    if bal > 0 {
+                        if let Ok(Ok(_)) =
+                            client.try_withdraw_all_liquidity(&providers[pi], &assets[ai])
+                        {
+                            balances[pi][ai] = 0;
+                            pool_totals[ai] -= bal;
+                            expected_total -= bal;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                3 => {
+                    if pool_totals[ai] >= amt {
+                        if let Ok(Ok(_id)) =
+                            client.try_open_settlement(&providers[pi], &assets[ai], &amt)
+                        {
+                            pool_totals[ai] -= amt;
+                            expected_total -= amt;
+                            settlements.push(SettlementState {
+                                provider_idx: pi,
+                                asset_idx: ai,
+                                amount: amt,
+                                opened_at: ledger_seq,
+                                status: SettlementStatus::Pending,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                4 => {
+                    let pending: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if pending.is_empty() {
+                        false
+                    } else {
+                        let idx = pending[amt as usize % pending.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_cancel_settlement(&id) {
+                            let s = &mut settlements[idx];
+                            s.status = SettlementStatus::Cancelled;
+                            pool_totals[s.asset_idx] += s.amount;
+                            expected_total += s.amount;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                5 => {
+                    let pending: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if pending.is_empty() {
+                        false
+                    } else {
+                        let idx = pending[amt as usize % pending.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_execute_settlement(&id) {
+                            settlements[idx].status = SettlementStatus::Executed;
+                            // expected_total unchanged
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+                _ => {
+                    let expired: Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| {
+                            s.status == SettlementStatus::Pending
+                                && ledger_seq >= s.opened_at + 10
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if expired.is_empty() {
+                        false
+                    } else {
+                        let idx = expired[amt as usize % expired.len()];
+                        let id = idx as u64 + 1;
+                        if let Ok(Ok(())) = client.try_cancel_expired_settlement(&id) {
+                            let s = &mut settlements[idx];
+                            s.status = SettlementStatus::Expired;
+                            pool_totals[s.asset_idx] += s.amount;
+                            expected_total += s.amount;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            };
+
+            if executed {
+                prop_assert_eq!(client.total_liquidity_all(), expected_total);
+            }
+
+            ledger_seq += 1;
+            env.ledger().set_sequence_number(ledger_seq);
+        }
     }
 }
 
@@ -894,6 +1252,21 @@ fn test_propose_admin_overwrites_prior_proposal() {
     assert_eq!(client.pending_admin(), second);
     let err = client.try_accept_admin(&first).err().unwrap().unwrap();
     assert_eq!(err, Error::NotPendingAdmin);
+}
+
+#[test]
+fn test_propose_admin_rejects_current_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+
+    client.initialize(&admin);
+    let err = client.try_propose_admin(&admin).err().unwrap().unwrap();
+
+    assert_eq!(err, Error::InvalidAdminCandidate);
+    // No pending admin was set.
+    let err = client.try_pending_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoPendingAdmin);
 }
 
 #[test]
@@ -1240,6 +1613,65 @@ fn test_cancel_expired_settlement_rejects_unknown_id() {
 }
 
 #[test]
+fn test_expiry_window_shortened_after_open_makes_settlement_reclaimable_earlier() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open a settlement under a 50-ledger window.
+    client.set_settlement_expiry_ledgers(&50);
+    let id = client.open_settlement(&anchor, &asset, &400); // opened_at == 0
+
+    // Advance one ledger before original expiry — still not expired.
+    env.ledger().set_sequence_number(49);
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotExpired);
+
+    // Shorten the window retroactively.
+    client.set_settlement_expiry_ledgers(&30);
+
+    // Now at ledger 49, the settlement IS expired (opened_at 0 + 30 ≤ 49).
+    client.cancel_expired_settlement(&id);
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_expiry_window_lengthened_after_open_delays_reclaimability() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open a settlement under a 10-ledger window.
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400); // opened_at == 0
+
+    // Lengthen the window before original expiry.
+    client.set_settlement_expiry_ledgers(&50);
+
+    // At ledger 10 the settlement was opened at ledger 0 and the window is
+    // now 50, so 10 < 50 — not yet expired despite being past the original
+    // window.
+    env.ledger().set_sequence_number(10);
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotExpired);
+
+    // At ledger 50 the settlement finally expires.
+    env.ledger().set_sequence_number(50);
+    client.cancel_expired_settlement(&id);
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
 fn test_list_fee_waived_anchors_filters_non_waived() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1310,6 +1742,102 @@ fn test_list_fee_waived_anchors_empty_by_default() {
     client.register_anchor(&anchor);
 
     assert_eq!(client.list_fee_waived_anchors(&0, &10).len(), 0);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_zero_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_increments_on_grant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+
+    client.set_fee_waiver(&a1, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_decrements_on_revoke() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+
+    client.set_fee_waiver(&a1, &false);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+
+    client.set_fee_waiver(&a2, &false);
+    assert_eq!(client.fee_waived_anchor_count(), 0);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_excludes_deregistered() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+    assert_eq!(client.fee_waived_anchor_count(), 2);
+
+    client.deregister_anchor(&a1);
+    assert_eq!(client.fee_waived_anchor_count(), 1);
+}
+
+#[test]
+fn test_fee_waived_anchor_count_matches_list_length() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.register_anchor(&a3);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a3, &true);
+
+    assert_eq!(
+        client.fee_waived_anchor_count(),
+        client.list_fee_waived_anchors(&0, &10).len(),
+    );
 }
 
 #[test]
@@ -1390,6 +1918,59 @@ fn test_register_anchors_batch_empty_is_noop() {
     client.register_anchors(&vec![&env]);
 
     assert_eq!(client.anchor_count(), 0);
+}
+
+#[test]
+fn test_register_anchors_batch_emits_events_in_order() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchors(&vec![&env, a1.clone(), a2.clone(), a3.clone()]);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a1.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a2.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("anchor"), a3.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_register_anchors_batch_failure_emits_zero_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+
+    let a2 = Address::generate(&env);
+    let _ = client.try_register_anchors(&vec![&env, a2.clone(), a1.clone()]);
+
+    let events = env.events().all();
+    assert_eq!(events, vec![&env]);
 }
 
 #[test]
@@ -1600,22 +2181,154 @@ fn test_stranger_cannot_pause() {
 }
 
 #[test]
-#[should_panic]
-fn test_operator_cannot_set_fee() {
+fn test_operator_is_rejected_by_every_strictly_admin_only_entrypoint() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     let operator = Address::generate(&env);
+    let anchor = Address::generate(&env);
+    let candidate = Address::generate(&env);
+    let replacement_operator = Address::generate(&env);
+    let new_anchor = Address::generate(&env);
+    let batch_anchor_one = Address::generate(&env);
+    let batch_anchor_two = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
     client.initialize(&admin);
     client.set_operator(&operator);
+    client.register_anchor(&anchor);
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &100);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+    let executed_id = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&executed_id);
+    let pending_id = client.open_settlement(&anchor, &asset, &100);
 
-    // The operator role only extends to pause/unpause; admin-only mutations
-    // like `set_fee` still require the real admin's own signature, which is
-    // unaffected by an operator being appointed. With every mocked auth
-    // cleared, `set_fee` has no way to authenticate and must panic rather
-    // than let the operator (or anyone else) stand in for the admin.
-    env.set_auths(&[]);
-    client.set_fee(&25);
+    // Each call supplies valid state and arguments so an authorization change
+    // cannot be hidden by a later validation error. Strict admin checks ask
+    // for the admin's signature, so presenting only the appointed operator's
+    // exact invocation must produce a host auth failure, not a contract error.
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_admin",
+        (candidate.clone(),),
+        client.try_set_admin(&candidate)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "propose_admin",
+        (candidate.clone(),),
+        client.try_propose_admin(&candidate)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_operator",
+        (replacement_operator.clone(),),
+        client.try_set_operator(&replacement_operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_fee",
+        (25_u32,),
+        client.try_set_fee(&25)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_fee_waiver",
+        (anchor.clone(), true),
+        client.try_set_fee_waiver(&anchor, &true)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_asset_fee",
+        (asset.clone(), 50_u32),
+        client.try_set_asset_fee(&asset, &50)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "clear_asset_fee",
+        (asset.clone(),),
+        client.try_clear_asset_fee(&asset)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_settlement_expiry_ledgers",
+        (100_u32,),
+        client.try_set_settlement_expiry_ledgers(&100)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "collect_fees",
+        (asset.clone(),),
+        client.try_collect_fees(&asset)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "register_anchor",
+        (new_anchor.clone(),),
+        client.try_register_anchor(&new_anchor)
+    );
+    let batch = vec![&env, batch_anchor_one.clone(), batch_anchor_two.clone()];
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "register_anchors",
+        (batch.clone(),),
+        client.try_register_anchors(&batch)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "deregister_anchor",
+        (anchor.clone(),),
+        client.try_deregister_anchor(&anchor)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_min_liquidity",
+        (asset.clone(), 10_i128),
+        client.try_set_min_liquidity(&asset, &10)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "set_max_settlement_amount",
+        (asset.clone(), 500_i128),
+        client.try_set_max_settlement_amount(&asset, &500)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "execute_settlement",
+        (pending_id,),
+        client.try_execute_settlement(&pending_id)
+    );
 }
 
 #[test]
@@ -1713,6 +2426,67 @@ fn test_withdraw_all_liquidity_blocked_by_min_liquidity_floor() {
         .unwrap();
     assert_eq!(err, Error::BelowMinLiquidity);
     assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_withdraw_event_parity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Capture events from withdraw_all_liquidity.
+    let amount = client.withdraw_all_liquidity(&anchor, &asset);
+    let events_all = env.events().all();
+
+    assert_eq!(amount, 1_000);
+    assert_eq!(
+        events_all,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                amount.into_val(&env),
+            ),
+        ],
+        "withdraw_all_liquidity must emit the same event shape as withdraw_liquidity \
+         for an equivalent withdrawal"
+    );
+}
+
+#[test]
+fn test_withdraw_liquidity_event_shape_matches_withdraw_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Capture events from withdraw_liquidity with the full balance.
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    let events_all = env.events().all();
+
+    assert_eq!(
+        events_all,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                1_000i128.into_val(&env),
+            ),
+        ],
+        "withdraw_liquidity with the full balance must emit the same event shape \
+         as withdraw_all_liquidity for an equivalent withdrawal"
+    );
 }
 
 #[test]
@@ -1879,6 +2653,56 @@ fn test_total_fees_accrued_sums_across_assets() {
 }
 
 #[test]
+fn test_waived_fee_volume_accumulates() {
+    let env = Env::default();
+    let (client, admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    // Not waived initially
+    client.open_settlement(&anchor, &asset, &200);
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    // Apply waiver
+    client.set_fee_waiver(&anchor, &true);
+
+    // Waived settlement 1: 1% of 300 = 3
+    client.open_settlement(&anchor, &asset, &300);
+    assert_eq!(client.waived_fee_volume(&asset), 3);
+
+    // Waived settlement 2: 1% of 400 = 4
+    client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.waived_fee_volume(&asset), 7);
+}
+
+#[test]
+fn test_total_waived_fee_volume_sums_across_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.set_fee(&100); // 1%
+    client.set_fee_waiver(&anchor, &true);
+
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+    assert_eq!(client.total_waived_fee_volume(), 0);
+
+    // 1% of 400 = 4 in USDC
+    client.open_settlement(&anchor, &usdc, &400);
+    // 1% of 200 = 2 in EURC
+    client.open_settlement(&anchor, &eurc, &200);
+
+    assert_eq!(client.total_waived_fee_volume(), 6);
+}
+
+#[test]
 fn test_list_settlements_by_status_filters_lifecycle_state() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
@@ -1938,6 +2762,60 @@ fn test_cancel_expired_settlement_rejects_double_reclaim() {
         .unwrap()
         .unwrap();
     assert_eq!(err, Error::InvalidSettlementState);
+}
+
+#[test]
+fn test_cancel_settlement_and_expired_race_cancel_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_settlement (anchor-authorized) wins the race.
+    client.cancel_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Cancelled);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_expired_settlement sees Cancelled != Pending and rejects.
+    let err = client
+        .try_cancel_expired_settlement(&id)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+}
+
+#[test]
+fn test_cancel_expired_and_settlement_race_expired_wins() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.total_liquidity(&asset), 600);
+
+    // Advance just past the expiry boundary.
+    env.ledger().set_sequence_number(10);
+
+    // cancel_expired_settlement (permissionless) wins the race.
+    client.cancel_expired_settlement(&id);
+
+    assert_eq!(client.settlement(&id).status, SettlementStatus::Expired);
+    // Pool credited exactly once.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
+
+    // cancel_settlement sees Expired != Pending and rejects.
+    let err = client.try_cancel_settlement(&id).err().unwrap().unwrap();
+    assert_eq!(err, Error::InvalidSettlementState);
+    // Pool unchanged — no double-credit.
+    assert_eq!(client.total_liquidity(&asset), 1_000);
 }
 
 #[test]
@@ -2098,6 +2976,53 @@ fn test_fee_waiver_takes_precedence_over_asset_fee_override() {
 
     let id = client.open_settlement(&anchor, &asset, &1_000);
     assert_eq!(client.settlement(&id).fee, 0);
+}
+
+#[test]
+fn test_quote_fee_parity_with_executed_accrual() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1% global
+
+    // --- global rate only: quote_fee must match settlement stamp and accrual ---
+    let amount = 10_000i128;
+    let quoted = client.quote_fee(&asset, &amount);
+    let id = client.open_settlement(&anchor, &asset, &amount);
+    let settlement = client.settlement(&id);
+    assert_eq!(
+        quoted, settlement.fee,
+        "quote_fee must equal settlement fee stamp under global rate"
+    );
+
+    let fees_before = client.fees_accrued(&asset);
+    client.execute_settlement(&id);
+    let fees_after = client.fees_accrued(&asset);
+    assert_eq!(
+        quoted,
+        fees_after - fees_before,
+        "quote_fee must equal fee accrued by execute_settlement under global rate"
+    );
+
+    // --- with asset_fee override: quote_fee must still match stamp and accrual ---
+    client.set_asset_fee(&asset, &500); // 5% override
+
+    let amount2 = 20_000i128;
+    let quoted2 = client.quote_fee(&asset, &amount2);
+    let id2 = client.open_settlement(&anchor, &asset, &amount2);
+    let settlement2 = client.settlement(&id2);
+    assert_eq!(
+        quoted2, settlement2.fee,
+        "quote_fee must equal settlement fee stamp under asset-fee override"
+    );
+
+    let fees_before2 = client.fees_accrued(&asset);
+    client.execute_settlement(&id2);
+    let fees_after2 = client.fees_accrued(&asset);
+    assert_eq!(
+        quoted2,
+        fees_after2 - fees_before2,
+        "quote_fee must equal fee accrued by execute_settlement under asset-fee override"
+    );
 }
 
 #[test]
@@ -2352,6 +3277,47 @@ fn test_provide_liquidity_multi_funds_every_asset() {
 }
 
 #[test]
+fn test_provide_liquidity_multi_tracks_providers_independently() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor1 = Address::generate(&env);
+    let anchor2 = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+    let asset3 = symbol_short!("AST3");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor1);
+    client.register_anchor(&anchor2);
+
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 100),
+        (asset3.clone(), 100),
+    ];
+    client.provide_liquidity_multi(&anchor1, &requests);
+
+    assert_eq!(client.pool(&asset1).providers, 1);
+    assert_eq!(client.pool(&asset2).providers, 1);
+    assert_eq!(client.pool(&asset3).providers, 1);
+
+    let withdraw_requests = vec![&env, (asset1.clone(), 100)];
+    client.withdraw_liquidity_multi(&anchor1, &withdraw_requests);
+
+    assert_eq!(client.pool(&asset1).providers, 0);
+    assert_eq!(client.pool(&asset2).providers, 1);
+    assert_eq!(client.pool(&asset3).providers, 1);
+
+    client.provide_liquidity(&anchor2, &asset2, &50);
+
+    assert_eq!(client.pool(&asset1).providers, 0);
+    assert_eq!(client.pool(&asset2).providers, 2);
+    assert_eq!(client.pool(&asset3).providers, 1);
+}
+
+#[test]
 fn test_provide_liquidity_multi_rejects_unregistered_anchor() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2505,361 +3471,811 @@ fn test_anchor_balances_empty_for_a_provider_with_no_liquidity() {
     assert_eq!(client.anchor_balances(&stranger, &0, &10).len(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// Atomicity regression tests — register_anchors
-// ---------------------------------------------------------------------------
-
-/// A batch of five anchors where the fourth entry is already registered must
-/// leave the registry completely unchanged: zero anchors from the batch land,
-/// and `anchor_count()` is unaffected.
+/// The `pool.providers` counter must track distinct active providers exactly
+/// through interleaved partial and full provide/withdraw sequences: partial
+/// withdrawals never decrement it, full withdrawals decrement it by one, and a
+/// re-entry from a zero balance increments it again. This exercises the
+/// [`do_withdraw`] underflow guard end-to-end via the real public entry points
+/// — the actual surface where the invariant could be broken.
 #[test]
-fn test_register_anchors_atomic_fourth_preregistered_rejects_whole_batch() {
+fn providers_counter_survives_interleaved_provide_withdraw() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
 
-    // Generate five distinct anchor addresses.
+    client.initialize(&admin);
+    client.register_anchor(&a);
+    client.register_anchor(&b);
+    client.register_anchor(&c);
+
+    client.provide_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    client.provide_liquidity(&b, &usdc, &2_000);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    // Partial withdrawal keeps a positive balance → count unchanged.
+    client.withdraw_liquidity(&a, &usdc, &300);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    client.provide_liquidity(&c, &usdc, &500);
+    assert_eq!(client.pool(&usdc).providers, 3);
+
+    // Full withdrawal → count drops to 2.
+    client.withdraw_liquidity(&b, &usdc, &2_000);
+    assert_eq!(client.pool(&usdc).providers, 2);
+
+    // a withdraws its remaining 700 → count drops to 1.
+    client.withdraw_liquidity(&a, &usdc, &700);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    // c tops up while already active → count unchanged.
+    client.provide_liquidity(&c, &usdc, &100);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    // c withdraws everything (500 + 100) → count drops to 0.
+    client.withdraw_liquidity(&c, &usdc, &600);
+    assert_eq!(client.pool(&usdc).providers, 0);
+
+    // Re-entry from zero balance increments back to 1.
+    client.provide_liquidity(&a, &usdc, &50);
+    assert_eq!(client.pool(&usdc).providers, 1);
+}
+
+/// A full withdrawal that returns a provider's balance to zero still
+/// decrements the provider count — guards against a regression in the
+/// unchanged zero-balance exit path.
+#[test]
+fn full_withdraw_still_decrements_providers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+    let a = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.register_anchor(&a);
+
+    client.provide_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 1);
+
+    client.withdraw_liquidity(&a, &usdc, &1_000);
+    assert_eq!(client.pool(&usdc).providers, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Pagination edge-case regression tests – issue #96
+//
+// Each list_* entrypoint is exercised for three edge-cases:
+//   1. start past the end  → must return an empty vec, not panic
+//   2. limit = 0           → must return an empty vec, not panic
+//   3. limit > remaining   → must return exactly the remaining items, not panic
+// ---------------------------------------------------------------------------
+
+// --- list_anchors ---
+
+#[test]
+fn test_list_anchors_start_past_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
     let a1 = Address::generate(&env);
     let a2 = Address::generate(&env);
-    let a3 = Address::generate(&env);
-    let a4 = Address::generate(&env);
-    let a5 = Address::generate(&env);
-
     client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
 
-    // Pre-register the fourth anchor individually so it already exists on-chain.
-    client.register_anchor(&a4);
-    assert_eq!(client.anchor_count(), 1);
-
-    // Submit a batch of five where the fourth entry collides with the
-    // already-registered anchor.
-    let err = client
-        .try_register_anchors(&vec![
-            &env,
-            a1.clone(),
-            a2.clone(),
-            a3.clone(),
-            a4.clone(), // already registered — makes the whole batch invalid
-            a5.clone(),
-        ])
-        .err()
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(err, Error::AnchorAlreadyRegistered);
-
-    // The count must not have changed: only the pre-existing anchor is registered.
-    assert_eq!(client.anchor_count(), 1);
-
-    // None of the new-in-batch anchors (a1, a2, a3, a5) may have been written.
-    assert!(!client.is_anchor(&a1));
-    assert!(!client.is_anchor(&a2));
-    assert!(!client.is_anchor(&a3));
-    assert!(!client.is_anchor(&a5));
-
-    // a4 was already registered before the call and must still be registered.
-    assert!(client.is_anchor(&a4));
+    // There are 2 anchors at indices 0 and 1; starting at index 2 is past end.
+    assert_eq!(client.list_anchors(&2, &10).len(), 0);
+    // Far-past-end with a u32 near its maximum should also be safe.
+    assert_eq!(client.list_anchors(&u32::MAX, &10).len(), 0);
 }
 
-/// A batch of five unique, previously-unregistered anchors must all land
-/// atomically: `is_anchor` is true for every entry and `anchor_count()`
-/// increases by exactly five.
 #[test]
-fn test_register_anchors_valid_batch_of_five_registers_all() {
+fn test_list_anchors_limit_zero_returns_empty() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
 
+    assert_eq!(client.list_anchors(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_anchors_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
     let a1 = Address::generate(&env);
     let a2 = Address::generate(&env);
-    let a3 = Address::generate(&env);
-    let a4 = Address::generate(&env);
-    let a5 = Address::generate(&env);
-
     client.initialize(&admin);
-    let count_before = client.anchor_count();
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
 
-    client.register_anchors(&vec![
-        &env,
-        a1.clone(),
-        a2.clone(),
-        a3.clone(),
-        a4.clone(),
-        a5.clone(),
-    ]);
-
-    // Every entry in the batch must be registered.
-    assert!(client.is_anchor(&a1));
-    assert!(client.is_anchor(&a2));
-    assert!(client.is_anchor(&a3));
-    assert!(client.is_anchor(&a4));
-    assert!(client.is_anchor(&a5));
-
-    // The count must have grown by exactly the batch size.
-    assert_eq!(client.anchor_count(), count_before + 5);
+    // Ask for 1000 but only 2 are registered; must get exactly 2.
+    let result = client.list_anchors(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    // Verify they are the same anchors in order.
+    assert_eq!(result.get(0).unwrap(), a1);
+    assert_eq!(result.get(1).unwrap(), a2);
 }
 
-/// A batch of five anchors where the fourth entry is a duplicate *within* the
-/// batch itself (not yet registered) must still reject the entire batch.
+// --- list_assets ---
+
 #[test]
-fn test_register_anchors_atomic_fourth_is_intra_batch_duplicate() {
+fn test_list_assets_start_past_end_returns_empty() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &100);
+    client.provide_liquidity(&anchor, &eurc, &100);
 
+    // 2 assets at indices 0 and 1; starting at index 2 is past end.
+    assert_eq!(client.list_assets(&2, &10).len(), 0);
+    assert_eq!(client.list_assets(&u32::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_assets_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    assert_eq!(client.list_assets(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_assets_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &100);
+    client.provide_liquidity(&anchor, &eurc, &100);
+
+    let result = client.list_assets(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap(), usdc);
+    assert_eq!(result.get(1).unwrap(), eurc);
+}
+
+// --- list_fee_waived_anchors ---
+
+#[test]
+fn test_list_fee_waived_anchors_start_past_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
     let a1 = Address::generate(&env);
     let a2 = Address::generate(&env);
-    let a3 = Address::generate(&env);
-    let a5 = Address::generate(&env);
-
     client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
 
-    // a1 is the first entry but also re-appears as the fourth — an intra-batch
-    // duplicate.
-    let err = client
-        .try_register_anchors(&vec![
-            &env,
-            a1.clone(),
-            a2.clone(),
-            a3.clone(),
-            a1.clone(), // duplicate of the first entry
-            a5.clone(),
-        ])
-        .err()
-        .unwrap()
-        .unwrap();
+    // The anchor list has 2 entries (indices 0 and 1); starting at index 2 is past end.
+    assert_eq!(client.list_fee_waived_anchors(&2, &10).len(), 0);
+    assert_eq!(client.list_fee_waived_anchors(&u32::MAX, &10).len(), 0);
+}
 
-    assert_eq!(err, Error::AnchorAlreadyRegistered);
+#[test]
+fn test_list_fee_waived_anchors_limit_zero_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.set_fee_waiver(&anchor, &true);
 
-    // None of the five addresses may be registered.
-    assert_eq!(client.anchor_count(), 0);
-    assert!(!client.is_anchor(&a1));
-    assert!(!client.is_anchor(&a2));
-    assert!(!client.is_anchor(&a3));
-    assert!(!client.is_anchor(&a5));
+    assert_eq!(client.list_fee_waived_anchors(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_fee_waived_anchors_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee_waiver(&a1, &true);
+    client.set_fee_waiver(&a2, &true);
+
+    let result = client.list_fee_waived_anchors(&0, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap(), a1);
+    assert_eq!(result.get(1).unwrap(), a2);
+}
+
+// --- list_settlements ---
+
+#[test]
+fn test_list_settlements_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+    // 2 settlements with ids 1 and 2; starting at id 3 is past end.
+    assert_eq!(client.list_settlements(&3, &10).len(), 0);
+    assert_eq!(client.list_settlements(&u64::MAX, &10).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements(&1, &0).len(), 0);
+    // start=0 normalises to id 1 internally; limit=0 should still return empty.
+    assert_eq!(client.list_settlements(&0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements(&1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_anchor ---
+
+#[test]
+fn test_list_settlements_by_anchor_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &3, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_anchor_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &1, &0).len(), 0);
+    assert_eq!(client.list_settlements_by_anchor(&anchor, &0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_by_anchor_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_anchor(&anchor, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_asset ---
+
+#[test]
+fn test_list_settlements_by_asset_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_asset(&asset, &3, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_asset_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.list_settlements_by_asset(&asset, &1, &0).len(), 0);
+    assert_eq!(client.list_settlements_by_asset(&asset, &0, &0).len(), 0);
+}
+
+#[test]
+fn test_list_settlements_by_asset_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_asset(&asset, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_by_status ---
+
+#[test]
+fn test_list_settlements_by_status_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &3, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_status_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &1, &0)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &0, &0)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_by_status_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result = client.list_settlements_by_status(&SettlementStatus::Pending, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
 }
 
 // ---------------------------------------------------------------------------
-// Atomicity regression tests — provide_liquidity_multi
+// Property-based tests for settlement aggregate consistency
+//
+// Randomized sequences of open/execute/cancel/expire operations across
+// multiple anchors and assets must not cause total_settled_amount or
+// settlement_count_by_status to drift from the ground truth produced by
+// scanning list_settlements.
 // ---------------------------------------------------------------------------
 
-/// A multi-provide batch where the fourth request contains a duplicate asset
-/// must reject the entire batch: no balances change.
-#[test]
-fn test_provide_liquidity_multi_atomic_fourth_duplicate_asset_rejects_batch() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
-    let usdc = symbol_short!("USDC");
-    let eurc = symbol_short!("EURC");
-    let gbpc = symbol_short!("GBPC");
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
 
-    client.initialize(&admin);
-    client.register_anchor(&anchor);
+    #[test]
+    fn prop_settlement_aggregates_survive_randomized_lifecycles(
+        plan in prop::collection::vec(
+            (
+                0u32..4,           // anchor_idx
+                0u32..4,           // asset_idx
+                1i128..251i128,    // amount
+                0u32..4u32,        // action: 0=Pending, 1=Execute, 2=Cancel, 3=Expire
+            ),
+            1..12,
+        ),
+        shuffle_seed in prop::num::u64::ANY,
+    ) {
+        use SettlementStatus::*;
 
-    // Four distinct assets followed by a fifth entry that duplicates the
-    // second asset (eurc), making the fourth position the problematic one.
-    let requests = vec![
-        &env,
-        (usdc.clone(), 100i128),
-        (eurc.clone(), 200i128),
-        (gbpc.clone(), 300i128),
-        (eurc.clone(), 50i128), // duplicate — invalid fourth entry
-    ];
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
 
-    let err = client
-        .try_provide_liquidity_multi(&anchor, &requests)
-        .err()
-        .unwrap()
-        .unwrap();
+        let anchrs: Vec<Address> = (0..4).map(|_| Address::generate(&env)).collect();
+        let assets = [
+            symbol_short!("USDC"),
+            symbol_short!("EURC"),
+            symbol_short!("GBPC"),
+            symbol_short!("XLM"),
+        ];
 
-    assert_eq!(err, Error::DuplicateAssetInBatch);
+        client.initialize(&admin);
 
-    // No balance must have been written for any asset.
-    assert_eq!(client.balance(&anchor, &usdc), 0);
-    assert_eq!(client.balance(&anchor, &eurc), 0);
-    assert_eq!(client.balance(&anchor, &gbpc), 0);
-    assert_eq!(client.total_liquidity(&usdc), 0);
-    assert_eq!(client.total_liquidity(&eurc), 0);
-    assert_eq!(client.total_liquidity(&gbpc), 0);
+        for a in &anchrs {
+            client.register_anchor(a);
+            for s in &assets {
+                client.provide_liquidity(a, s, &1_000_000);
+            }
+        }
+
+        client.set_fee(&50);
+        client.set_settlement_expiry_ledgers(&10_000);
+
+        let mut ops: Vec<(u64, u32)> = Vec::new();
+
+        for (ai, si, amount, action) in plan {
+            let anchor = &anchrs[ai as usize % anchrs.len()];
+            let asset = &assets[si as usize % assets.len()];
+            let id = client.open_settlement(anchor, asset, &amount);
+            if action != 0 {
+                ops.push((id, action));
+            }
+        }
+
+        // Fisher-Yates shuffle using the seed for deterministic interleaving
+        let mut state = shuffle_seed;
+        for i in (1..ops.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let j = (state >> 33) as usize % (i + 1);
+            ops.swap(i, j);
+        }
+
+        if ops.iter().any(|(_, a)| *a == 3) {
+            env.ledger().set_sequence_number(20_000);
+        }
+
+        for (id, action) in &ops {
+            match action {
+                1 => client.execute_settlement(id),
+                2 => client.cancel_settlement(id),
+                3 => client.cancel_expired_settlement(id),
+                _ => unreachable!(),
+            }
+        }
+
+        // Ground truth: manually count and sum from every stored settlement
+        let all = client.list_settlements(&1, &u32::MAX);
+        let mut manual_counts = [0u64; 4];
+        let mut manual_amounts = [0i128; 4];
+
+        for s in all.iter() {
+            let idx = match s.status {
+                Pending => 0,
+                Executed => 1,
+                Cancelled => 2,
+                Expired => 3,
+            };
+            manual_counts[idx] += 1;
+            manual_amounts[idx] += s.amount;
+        }
+
+        let statuses = [Pending, Executed, Cancelled, Expired];
+        for (i, status) in statuses.iter().enumerate() {
+            prop_assert_eq!(
+                client.settlement_count_by_status(status),
+                manual_counts[i],
+                "settlement_count_by_status mismatch for {:?}",
+                status,
+            );
+            prop_assert_eq!(
+                client.total_settled_amount(status),
+                manual_amounts[i],
+                "total_settled_amount mismatch for {:?}",
+                status,
+            );
+        }
+    }
 }
 
-/// A fully valid multi-provide batch of five (asset, amount) pairs must fund
-/// every asset and increase the pool totals by the corresponding amounts.
+// --- hello (smoke test that setup still works after all new tests) ---
+
 #[test]
-fn test_provide_liquidity_multi_valid_batch_of_five_funds_all() {
+fn test_hello() {
     let env = Env::default();
-    env.mock_all_auths();
     let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
-    let usdc = symbol_short!("USDC");
-    let eurc = symbol_short!("EURC");
-    let gbpc = symbol_short!("GBPC");
-    let xlm = symbol_short!("XLM");
-    let btc = symbol_short!("BTC");
-
     client.initialize(&admin);
-    client.register_anchor(&anchor);
-
-    let requests = vec![
-        &env,
-        (usdc.clone(), 100i128),
-        (eurc.clone(), 200i128),
-        (gbpc.clone(), 300i128),
-        (xlm.clone(), 400i128),
-        (btc.clone(), 500i128),
-    ];
-
-    client.provide_liquidity_multi(&anchor, &requests);
-
-    assert_eq!(client.balance(&anchor, &usdc), 100);
-    assert_eq!(client.balance(&anchor, &eurc), 200);
-    assert_eq!(client.balance(&anchor, &gbpc), 300);
-    assert_eq!(client.balance(&anchor, &xlm), 400);
-    assert_eq!(client.balance(&anchor, &btc), 500);
-    assert_eq!(client.total_liquidity(&usdc), 100);
-    assert_eq!(client.total_liquidity(&eurc), 200);
-    assert_eq!(client.total_liquidity(&gbpc), 300);
-    assert_eq!(client.total_liquidity(&xlm), 400);
-    assert_eq!(client.total_liquidity(&btc), 500);
+    assert!(client.is_initialized());
 }
 
-// ---------------------------------------------------------------------------
-// Atomicity regression tests — withdraw_liquidity_multi
-// ---------------------------------------------------------------------------
+// ──────────────────────────────────────────────────────────────────────
+// TTL bump-on-read tests for the risk/fee configuration getters (issue #122)
+// and for is_fee_waived / get_fees_accrued (issue #121). Each getter now
+// extends its entry's TTL on a successful read, matching what its setter
+// already does. balance()'s read-side gap is a separate companion issue.
+//
+// Strategy: configure the value via its setter, advance the ledger far enough
+// that the entry's TTL decays below the extend threshold, snapshot the TTL,
+// read via the public getter, and confirm the read refreshed the TTL. Without
+// the fix the getter is a pure read and the TTL is unchanged, so `after >
+// before` fails; with the fix it bumps back up.
+// ──────────────────────────────────────────────────────────────────────
 
-/// A multi-withdraw batch where the fourth request has insufficient balance
-/// must reject the entire batch: no balances change.
-#[test]
-fn test_withdraw_liquidity_multi_atomic_fourth_insufficient_rejects_batch() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
-    let usdc = symbol_short!("USDC");
-    let eurc = symbol_short!("EURC");
-    let gbpc = symbol_short!("GBPC");
-    let xlm = symbol_short!("XLM");
-    let btc = symbol_short!("BTC");
+// The setter bumps TTL to BUMP_AMOUNT (30 * DAY_IN_LEDGERS) and the extend
+// threshold is one DAY_IN_LEDGERS (17_280) below that. Advancing past that
+// window guarantees the next read actually triggers `extend_ttl` rather than
+// being a no-op.
+const TTL_DECAY_LEDGERS: u32 = 20_000;
 
-    client.initialize(&admin);
-    client.register_anchor(&anchor);
-    client.provide_liquidity(&anchor, &usdc, &500);
-    client.provide_liquidity(&anchor, &eurc, &500);
-    client.provide_liquidity(&anchor, &gbpc, &500);
-    client.provide_liquidity(&anchor, &xlm, &50); // intentionally small
-    client.provide_liquidity(&anchor, &btc, &500);
-
-    // The fourth leg (xlm) requests 400 but the provider only holds 50 —
-    // the whole batch must be rejected.
-    let requests = vec![
-        &env,
-        (usdc.clone(), 100i128),
-        (eurc.clone(), 100i128),
-        (gbpc.clone(), 100i128),
-        (xlm.clone(), 400i128), // exceeds balance — invalid fourth entry
-        (btc.clone(), 100i128),
-    ];
-
-    let err = client
-        .try_withdraw_liquidity_multi(&anchor, &requests)
-        .err()
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(err, Error::InsufficientLiquidity);
-
-    // Every balance must be exactly as it was before the call.
-    assert_eq!(client.balance(&anchor, &usdc), 500);
-    assert_eq!(client.balance(&anchor, &eurc), 500);
-    assert_eq!(client.balance(&anchor, &gbpc), 500);
-    assert_eq!(client.balance(&anchor, &xlm), 50);
-    assert_eq!(client.balance(&anchor, &btc), 500);
+fn advance_ledger(env: &Env, by: u32) {
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + by);
 }
 
-/// A fully valid multi-withdraw batch of five (asset, amount) pairs must
-/// reduce every balance by the requested amount and leave the totals correct.
-#[test]
-fn test_withdraw_liquidity_multi_valid_batch_of_five_withdraws_all() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
-    let usdc = symbol_short!("USDC");
-    let eurc = symbol_short!("EURC");
-    let gbpc = symbol_short!("GBPC");
-    let xlm = symbol_short!("XLM");
-    let btc = symbol_short!("BTC");
-
-    client.initialize(&admin);
-    client.register_anchor(&anchor);
-    client.provide_liquidity(&anchor, &usdc, &500);
-    client.provide_liquidity(&anchor, &eurc, &500);
-    client.provide_liquidity(&anchor, &gbpc, &500);
-    client.provide_liquidity(&anchor, &xlm, &500);
-    client.provide_liquidity(&anchor, &btc, &500);
-
-    let requests = vec![
-        &env,
-        (usdc.clone(), 100i128),
-        (eurc.clone(), 200i128),
-        (gbpc.clone(), 300i128),
-        (xlm.clone(), 400i128),
-        (btc.clone(), 500i128),
-    ];
-
-    client.withdraw_liquidity_multi(&anchor, &requests);
-
-    assert_eq!(client.balance(&anchor, &usdc), 400);
-    assert_eq!(client.balance(&anchor, &eurc), 300);
-    assert_eq!(client.balance(&anchor, &gbpc), 200);
-    assert_eq!(client.balance(&anchor, &xlm), 100);
-    assert_eq!(client.balance(&anchor, &btc), 0);
-    assert_eq!(client.total_liquidity(&usdc), 400);
-    assert_eq!(client.total_liquidity(&eurc), 300);
-    assert_eq!(client.total_liquidity(&gbpc), 200);
-    assert_eq!(client.total_liquidity(&xlm), 100);
-    assert_eq!(client.total_liquidity(&btc), 0);
+fn persistent_ttl(env: &Env, contract: &Address, key: &DataKey) -> u32 {
+    env.as_contract(contract, || env.storage().persistent().get_ttl(key))
 }
 
-/// A multi-withdraw batch where the fourth request is a duplicate asset must
-/// reject the entire batch atomically.
+/// Seeds a real `FeesAccrued` entry for `asset` by executing a settlement with
+/// a non-zero fee on a non-waived anchor, and returns the accrued amount.
+fn seed_fees_accrued(
+    client: &AnchornetContractClient<'_>,
+    anchor: &Address,
+    asset: &Symbol,
+) -> i128 {
+    client.set_fee(&100); // 1%
+    let id = client.open_settlement(anchor, asset, &400);
+    client.execute_settlement(&id);
+    client.fees_accrued(asset)
+}
+
 #[test]
-fn test_withdraw_liquidity_multi_atomic_fourth_duplicate_asset_rejects_batch() {
+fn test_min_liquidity_read_bumps_ttl() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
-    let usdc = symbol_short!("USDC");
-    let eurc = symbol_short!("EURC");
-    let gbpc = symbol_short!("GBPC");
-
+    let asset = symbol_short!("USDC");
     client.initialize(&admin);
-    client.register_anchor(&anchor);
-    client.provide_liquidity(&anchor, &usdc, &1_000);
-    client.provide_liquidity(&anchor, &eurc, &1_000);
-    client.provide_liquidity(&anchor, &gbpc, &1_000);
+    client.set_min_liquidity(&asset, &100);
 
-    // The fourth entry duplicates the second (eurc).
-    let requests = vec![
-        &env,
-        (usdc.clone(), 100i128),
-        (eurc.clone(), 100i128),
-        (gbpc.clone(), 100i128),
-        (eurc.clone(), 50i128), // duplicate — invalid fourth entry
-    ];
+    let key = DataKey::MinLiquidity(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
 
-    let err = client
-        .try_withdraw_liquidity_multi(&anchor, &requests)
-        .err()
-        .unwrap()
-        .unwrap();
+    // Read-only call: no setter involved.
+    assert_eq!(client.min_liquidity(&asset), 100);
 
-    assert_eq!(err, Error::DuplicateAssetInBatch);
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "min_liquidity read did not bump TTL: before={before}, after={after}",
+    );
+}
 
-    // No balance must have changed.
-    assert_eq!(client.balance(&anchor, &usdc), 1_000);
-    assert_eq!(client.balance(&anchor, &eurc), 1_000);
-    assert_eq!(client.balance(&anchor, &gbpc), 1_000);
+#[test]
+fn test_is_fee_waived_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    client.set_fee_waiver(&anchor, &true);
+
+    let key = DataKey::FeeWaiver(anchor.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert!(client.is_fee_waived(&anchor));
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "is_fee_waived read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_max_settlement_amount_read_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_max_settlement_amount(&asset, &5_000);
+
+    let key = DataKey::MaxSettlementAmount(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.max_settlement_amount(&asset), 5_000);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "max_settlement_amount read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_get_fees_accrued_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    assert!(seed_fees_accrued(&client, &anchor, &asset) > 0);
+
+    let key = DataKey::FeesAccrued(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.fees_accrued(&asset), 4);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "fees_accrued read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_asset_fee_read_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_asset_fee(&asset, &50);
+
+    let key = DataKey::AssetFee(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.asset_fee(&asset), 50);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "asset_fee read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_total_fees_accrued_bumps_each_asset_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    assert!(seed_fees_accrued(&client, &anchor, &asset) > 0);
+
+    let key = DataKey::FeesAccrued(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // total_fees_accrued iterates over get_fees_accrued — the cascade must bump
+    // each per-asset entry's TTL (acceptance criteria: "Verify total_fees_accrued
+    // benefits automatically once fixed").
+    let _ = client.total_fees_accrued();
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "total_fees_accrued did not cascade the TTL bump to the per-asset entry: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_min_liquidity_repeated_reads_keep_ttl_fresh() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_min_liquidity(&asset, &100);
+
+    let key = DataKey::MinLiquidity(asset.clone());
+
+    // Sustained "set once, read constantly" scenario from the issue's security
+    // notes: each read over an advancing ledger should refresh the TTL, so the
+    // entry never drifts toward archival.
+    for _ in 0..2 {
+        advance_ledger(&env, TTL_DECAY_LEDGERS);
+        let _ = client.min_liquidity(&asset);
+    }
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+    let _ = client.min_liquidity(&asset);
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "repeated reads did not keep TTL fresh: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_is_fee_waived_repeated_reads_keep_ttl_fresh() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    client.set_fee_waiver(&anchor, &true);
+
+    let key = DataKey::FeeWaiver(anchor.clone());
+
+    // Sustained "set once, read constantly" scenario from the issue's security
+    // notes: each read over an advancing ledger should refresh the TTL, so the
+    // waiver never drifts toward archival.
+    for _ in 0..2 {
+        advance_ledger(&env, TTL_DECAY_LEDGERS);
+        let _ = client.is_fee_waived(&anchor);
+    }
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+    let _ = client.is_fee_waived(&anchor);
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "repeated reads did not keep TTL fresh: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_min_liquidity_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // Never configured: the `.has` guard must skip `extend_ttl` (which would
+    // panic on an absent key) and the getter must still return the default.
+    assert_eq!(client.min_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_asset_fee_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // No override configured: `get_asset_fee` returns `None` without trying to
+    // extend an absent entry, so the effective fee falls back to the global fee.
+    assert_eq!(client.asset_fee(&asset), client.fee());
+}
+
+#[test]
+fn test_is_fee_waived_read_on_unconfigured_anchor_is_safe() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+
+    // Anchor registered but no waiver ever set: the `.has` guard must skip
+    // `extend_ttl` (which would panic on an absent key) and the getter must
+    // still return the `false` default.
+    assert!(!client.is_fee_waived(&anchor));
+}
+
+#[test]
+fn test_get_fees_accrued_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    // An asset that never accrued fees has no FeesAccrued entry: the getter
+    // returns `0` without trying to extend an absent entry.
+    let never_settled = symbol_short!("EURC");
+    assert_eq!(client.fees_accrued(&never_settled), 0);
 }

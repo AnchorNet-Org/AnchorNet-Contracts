@@ -2,6 +2,22 @@
 //!
 //! Indexers (the AnchorNet backend) subscribe to these events to keep an
 //! off-chain view of pool liquidity in sync with on-chain state.
+//!
+//! # Event-shape guarantees
+//!
+//! Every public entrypoint that changes pool liquidity emits a single event
+//! with a deterministic topic/data shape. The two withdrawal entrypoints
+//! — [`withdraw_liquidity`](crate::AnchornetContract::withdraw_liquidity) and
+//! [`withdraw_all_liquidity`](crate::AnchornetContract::withdraw_all_liquidity)
+//! — share the same internal emission path: `withdraw_all_liquidity` delegates
+//! to `withdraw_liquidity`, which calls [`liquidity_withdrawn`]. This means
+//! that for an equivalent withdrawal (same provider, asset, amount), both
+//! entrypoints produce an identical event with topics
+//! `("withdraw", provider, asset)` and data `amount`.
+//!
+//! This parity is enforced by a regression test
+//! (`test_withdraw_event_parity` in `test.rs`) so that any future refactor
+//! that would break the contract is caught immediately.
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
@@ -37,7 +53,13 @@ pub fn liquidity_provided(env: &Env, provider: &Address, asset: &Symbol, amount:
     );
 }
 
-/// Emitted when liquidity is withdrawn. Topics: `("withdraw", provider, asset)`.
+/// Emitted when liquidity is withdrawn. Topics: `("withdraw", provider, asset)`, data: `amount`.
+///
+/// Both [`withdraw_liquidity`](crate::AnchornetContract::withdraw_liquidity)
+/// and [`withdraw_all_liquidity`](crate::AnchornetContract::withdraw_all_liquidity)
+/// emit this event via the same internal code path (the latter delegates to the
+/// former), guaranteeing identical topic/data shape for equivalent withdrawals.
+/// See the [module-level docs](self) for the full parity contract.
 pub fn liquidity_withdrawn(env: &Env, provider: &Address, asset: &Symbol, amount: i128) {
     env.events().publish(
         (symbol_short!("withdraw"), provider.clone(), asset.clone()),
