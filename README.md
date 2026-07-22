@@ -32,6 +32,7 @@ cargo test
 
 - `src/lib.rs` – contract entrypoint and public interface
 - `src/error.rs` – error codes returned to clients
+- [`docs/ADMIN.md`](docs/ADMIN.md) – privileged admin/operator roles, lifecycle, and security properties
 - [`docs/ERRORS.md`](docs/ERRORS.md) – stable error-code reference and originating entrypoints
 - [`docs/PAGINATION.md`](docs/PAGINATION.md) – stable pagination semantics reference and worked examples
 - `src/types.rs` – on-chain data types (`Pool`)
@@ -82,8 +83,8 @@ state.
 | Function | Auth | Description |
 |----------|------|-------------|
 | `pause(caller)` / `unpause(caller)` | admin or operator | Halt or resume liquidity & settlement mutations |
-| `is_paused()` | – | Read the paused flag |
 | `set_operator(operator)` | admin | Appoint an operator that may pause/unpause but cannot change fees or admin |
+| `clear_operator()` | admin | Revoke the operator role entirely |
 | `operator()` | – | Read the currently appointed operator |
 | `is_operator(address)` | – | Check whether an address is the currently appointed operator |
 | `extend_instance_ttl(caller)` | admin or operator | Extend the contract instance/code TTL so it survives long inactivity |
@@ -121,12 +122,15 @@ produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
 | `cancel_expired_settlement(id)` | – | Reclaim a timed-out pending settlement's liquidity to the pool |
 | `set_settlement_expiry_ledgers(ledgers)` | admin | Set the ledger window after which a pending settlement may be reclaimed (0 disables) |
 | `settlement_expiry_ledgers()` | – | Read the settlement expiry window in ledgers |
+| `settlement_exists(id)` | – | Check whether a settlement exists |
+| `is_settlement_pending(id)` | – | Check whether a settlement exists and its status is `Pending` |
 | `is_settlement_expired(id)` | – | Check whether a pending settlement has passed the expiry window, without reclaiming it |
 | `settlement(id)` | – | Read a settlement record |
 | `settlement_count()` | – | Read the number of settlements |
 | `list_settlements(start, limit)` | – | Page through settlements |
 | `list_settlements_by_anchor(anchor, start, limit)` | – | Page through settlements opened by one anchor |
 | `list_settlements_by_asset(asset, start, limit)` | – | Page through settlements in one asset |
+| `list_settlements_by_anchor_and_asset(anchor, asset, start, limit)` | – | Page through settlements matching both anchor and asset |
 | `list_settlements_by_status(status, start, limit)` | – | Page through settlements in a given lifecycle state |
 | `settlement_count_by_status(status)` | – | Count every settlement in a given lifecycle state (no pagination) |
 | `total_settled_amount(status)` | – | Sum settled `amount` across every settlement in a given lifecycle state |
@@ -141,7 +145,47 @@ settlement has passed the configured expiry window.
 have no implicit sender) that must be either the admin or the appointed
 operator; the operator role is scoped to this one lifecycle switch and
 carries no ability to change the fee, the admin, or any other admin-only
-setting.
+setting. Note that appointing the admin as its own operator is a supported
+(if redundant) dual-role configuration.
+
+#### Operator permission boundary
+
+The table below lists **every gated entrypoint** and which guard function
+it calls in [`src/lib.rs`](src/lib.rs), so integrators and delegates can
+verify the boundary without reading individual doc comments.
+
+**`require_admin_or_operator` — admin _or_ operator may call**
+
+| Entrypoint | Description |
+|---|---|
+| `pause(caller)` | Halt liquidity & settlement mutations |
+| `unpause(caller)` | Resume after a pause |
+| `extend_instance_ttl(caller)` | Extend contract instance/code TTL |
+
+**`require_admin` — admin only (operator excluded)**
+
+| Entrypoint | Description |
+|---|---|
+| `set_admin(new_admin)` | Transfer administration (single-step) |
+| `propose_admin(candidate)` | Initiate a two-step admin transfer |
+| `set_operator(operator)` | Appoint or replace the operator |
+| `register_anchor(anchor)` | Approve a new liquidity provider |
+| `register_anchors(anchors)` | Batch-approve liquidity providers |
+| `deregister_anchor(anchor)` | Remove an anchor from the approved set |
+| `set_fee(bps)` | Set the global protocol fee |
+| `set_asset_fee(asset, bps)` | Override the fee for one asset |
+| `clear_asset_fee(asset)` | Remove an asset's fee override |
+| `set_fee_waiver(anchor, waived)` | Grant or revoke a fee waiver |
+| `collect_fees(asset)` | Collect accrued protocol fees |
+| `set_min_liquidity(asset, floor)` | Set the minimum liquidity floor |
+| `set_max_settlement_amount(asset, amount)` | Cap per-settlement reserve size |
+| `set_settlement_expiry_ledgers(ledgers)` | Set the settlement expiry window |
+| `execute_settlement(id)` | Finalize a pending settlement |
+
+> **Note:** The three-entry `require_admin_or_operator` list and the
+> fifteen-entry `require_admin` list are derived directly from the
+> corresponding call sites in `src/lib.rs`. When a new entrypoint is added,
+> check which guard it calls and update this table accordingly.
 
 ### Events
 
@@ -150,18 +194,19 @@ setting.
 - `("propose",)` – admin transfer proposed
 - `("anchor", anchor)` / `("deanchor", anchor)` – anchor registered / removed
 - `("provide", provider, asset)` – liquidity provided
-- `("asset_onboarded", asset)` – first liquidity provision for a new asset
+- `("onboarded", asset)` – first liquidity provision for a new asset
 - `("withdraw", provider, asset)` – liquidity withdrawn
-- `("paused",)` – paused flag changed; data is `true` when pausing, `false` when unpausing
-- `("fee",)` – protocol fee changed
+- `("paused",)` – paused flag flipped (data: `bool`)
+- `("fee",)` – fee rate changed (data: `u32` bps)
 - `("waiver", anchor)` – anchor fee waiver granted or revoked
 - `("settle", anchor, asset)` – settlement opened
 - `("executed", id)` / `("cancelled", id)` – settlement finalized / cancelled
 - `("expired", id)` – settlement reclaimed after timing out
 - `("expiry",)` – settlement expiry window changed
 - `("collect", asset)` – fees collected
-- `("minliq", asset)` – asset minimum liquidity floor changed
+- `("minliq", asset)` – minimum liquidity floor configured
 - `("operator",)` – operator appointed or replaced
+- `("op_clear",)` – operator role revoked
 
 ## Contract metadata
 

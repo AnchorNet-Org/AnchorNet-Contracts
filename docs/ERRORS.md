@@ -37,6 +37,7 @@ listed here.
 | 19 | `AboveMaxSettlementAmount` | The requested settlement amount exceeds the enabled per-asset maximum settlement amount. | `open_settlement` |
 | 20 | `DuplicateAssetInBatch` | The same asset appears more than once in a batch liquidity operation. | `provide_liquidity_multi`<br>`withdraw_liquidity_multi` |
 | 21 | `InvalidAdminCandidate` | The proposed administrator is the same as the current administrator. | `propose_admin` |
+| 22 | `Overflow` | Arithmetic overflow or underflow occurred during balance, fee, or settlement calculation. | `quote_fee`<br>`provide_liquidity`<br>`provide_liquidity_multi`<br>`withdraw_liquidity`<br>`withdraw_liquidity_multi`<br>`open_settlement`<br>`execute_settlement`<br>`cancel_settlement`<br>`cancel_expired_settlement`<br>`total_liquidity_all`<br>`total_fees_accrued`<br>`total_waived_fee_volume`<br>`total_settled_amount` |
 
 ## Maintaining this reference
 
