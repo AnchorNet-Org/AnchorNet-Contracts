@@ -32,6 +32,7 @@ cargo test
 
 - `src/lib.rs` – contract entrypoint and public interface
 - `src/error.rs` – error codes returned to clients
+- [`docs/ADMIN.md`](docs/ADMIN.md) – privileged admin/operator roles, lifecycle, and security properties
 - [`docs/ERRORS.md`](docs/ERRORS.md) – stable error-code reference and originating entrypoints
 - [`docs/PAGINATION.md`](docs/PAGINATION.md) – stable pagination semantics reference and worked examples
 - `src/types.rs` – on-chain data types (`Pool`)
