@@ -70,7 +70,7 @@ impl AnchornetContract {
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
         storage::set_admin(&env, &new_admin);
-        events::admin_changed(&env, &new_admin);
+        events::admin_changed(&env, &new_admin, false);
         Ok(())
     }
 
@@ -117,7 +117,7 @@ impl AnchornetContract {
 
         storage::set_admin(&env, &candidate);
         storage::clear_pending_admin(&env);
-        events::admin_changed(&env, &candidate);
+        events::admin_changed(&env, &candidate, true);
         Ok(())
     }
 
@@ -130,6 +130,16 @@ impl AnchornetContract {
         Self::require_admin(&env)?;
         storage::set_operator(&env, &operator);
         events::operator_changed(&env, &operator);
+        Ok(())
+    }
+
+    /// Revokes the operator role, returning the contract to an operator-less
+    /// state where no address has delegated pause/unpause authority.
+    /// Admin only.
+    pub fn clear_operator(env: Env) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_operator(&env);
+        events::operator_cleared(&env);
         Ok(())
     }
 
@@ -213,10 +223,10 @@ impl AnchornetContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(Self::calculate_fee(
+        Self::calculate_fee(
             amount,
             Self::effective_fee_bps(&env, &asset),
-        ))
+        )
     }
 
     /// Grants or revokes a protocol fee waiver for `anchor`. While waived,
@@ -448,7 +458,7 @@ impl AnchornetContract {
         if !storage::is_anchor(&env, &provider) {
             return Err(Error::AnchorNotRegistered);
         }
-        Self::do_provide(&env, &provider, &asset, amount);
+        Self::do_provide(&env, &provider, &asset, amount)?;
         Ok(())
     }
 
@@ -483,7 +493,7 @@ impl AnchornetContract {
         }
 
         for (asset, amount) in requests.iter() {
-            Self::do_provide(&env, &provider, &asset, amount);
+            Self::do_provide(&env, &provider, &asset, amount)?;
         }
         Ok(())
     }
@@ -554,7 +564,7 @@ impl AnchornetContract {
         }
         Self::require_min_liquidity(&env, &asset, amount)?;
 
-        Self::do_withdraw(&env, &provider, &asset, amount);
+        Self::do_withdraw(&env, &provider, &asset, amount)?;
         Ok(())
     }
 
@@ -594,7 +604,7 @@ impl AnchornetContract {
         }
 
         for (asset, amount) in requests.iter() {
-            Self::do_withdraw(&env, &provider, &asset, amount);
+            Self::do_withdraw(&env, &provider, &asset, amount)?;
         }
         Ok(())
     }
@@ -650,18 +660,23 @@ impl AnchornetContract {
         if pool.total < amount {
             return Err(Error::InsufficientLiquidity);
         }
-        pool.total -= amount;
+        pool.total = pool.total.checked_sub(amount).ok_or(Error::Overflow)?;
         storage::set_pool(&env, &asset, &pool);
 
         let fee = if storage::is_fee_waived(&env, &anchor) {
-            let waived_fee = Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset));
+            let waived_fee = Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))?;
             let current_volume = storage::get_waived_fee_volume(&env, &asset);
-            storage::set_waived_fee_volume(&env, &asset, current_volume + waived_fee);
+            let new_volume = current_volume
+                .checked_add(waived_fee)
+                .ok_or(Error::Overflow)?;
+            storage::set_waived_fee_volume(&env, &asset, new_volume);
             0
         } else {
-            Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))
+            Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))?
         };
-        let id = storage::get_settlement_count(&env) + 1;
+        let id = storage::get_settlement_count(&env)
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
         storage::set_settlement_count(&env, id);
         storage::set_settlement(
             &env,
@@ -690,7 +705,8 @@ impl AnchornetContract {
         }
 
         let accrued = storage::get_fees_accrued(&env, &settlement.asset);
-        storage::set_fees_accrued(&env, &settlement.asset, accrued + settlement.fee);
+        let new_accrued = accrued.checked_add(settlement.fee).ok_or(Error::Overflow)?;
+        storage::set_fees_accrued(&env, &settlement.asset, new_accrued);
 
         settlement.status = SettlementStatus::Executed;
         storage::set_settlement(&env, &settlement);
@@ -709,7 +725,7 @@ impl AnchornetContract {
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total += settlement.amount;
+        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Cancelled;
@@ -751,13 +767,16 @@ impl AnchornetContract {
         if expiry == 0 {
             return Err(Error::SettlementNotExpired);
         }
-        let expires_at = settlement.opened_at + expiry;
+        let expires_at = settlement
+            .opened_at
+            .checked_add(expiry)
+            .ok_or(Error::Overflow)?;
         if env.ledger().sequence() < expires_at {
             return Err(Error::SettlementNotExpired);
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total += settlement.amount;
+        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Expired;
@@ -785,7 +804,20 @@ impl AnchornetContract {
         if expiry == 0 {
             return Ok(false);
         }
-        Ok(env.ledger().sequence() >= settlement.opened_at + expiry)
+        let expires_at = match settlement.opened_at.checked_add(expiry) {
+            Some(v) => v,
+            None => return Err(Error::Overflow),
+        };
+        Ok(env.ledger().sequence() >= expires_at)
+    }
+
+    /// Returns the age of the settlement with `id` in ledgers elapsed since it
+    /// was opened (using the simulated ledger sequence, not wall-clock time).
+    /// Returns [`Error::SettlementNotFound`] if the settlement does not exist.
+    /// This is a complementary raw-value view to [`is_settlement_expired`](Self::is_settlement_expired).
+    pub fn settlement_age(env: Env, id: u64) -> Result<u32, Error> {
+        let settlement = storage::get_settlement(&env, id).ok_or(Error::SettlementNotFound)?;
+        Ok(env.ledger().sequence() - settlement.opened_at)
     }
 
     /// Returns the [`Pool`] for `asset`, or [`Error::PoolNotFound`] if no
@@ -832,24 +864,28 @@ impl AnchornetContract {
     /// [`list_assets`](Self::list_assets)). The result mixes units across
     /// assets, so it is only meaningful as a coarse, asset-agnostic activity
     /// signal rather than a spendable amount.
-    pub fn total_liquidity_all(env: Env) -> i128 {
+    pub fn total_liquidity_all(env: Env) -> Result<i128, Error> {
         let mut total: i128 = 0;
         for asset in storage::get_asset_list(&env).iter() {
-            total += storage::get_pool(&env, &asset).total;
+            total = total
+                .checked_add(storage::get_pool(&env, &asset).total)
+                .ok_or(Error::Overflow)?;
         }
-        total
+        Ok(total)
     }
 
     /// Returns the sum of [`fees_accrued`](Self::fees_accrued) across every
     /// asset that has ever had liquidity provided, i.e. the total protocol
     /// fees outstanding across the whole contract awaiting
     /// [`collect_fees`](Self::collect_fees).
-    pub fn total_fees_accrued(env: Env) -> i128 {
+    pub fn total_fees_accrued(env: Env) -> Result<i128, Error> {
         let mut total: i128 = 0;
         for asset in storage::get_asset_list(&env).iter() {
-            total += storage::get_fees_accrued(&env, &asset);
+            total = total
+                .checked_add(storage::get_fees_accrued(&env, &asset))
+                .ok_or(Error::Overflow)?;
         }
-        total
+        Ok(total)
     }
 
     /// Returns the forgone protocol fee revenue for `asset` due to active waivers.
@@ -859,12 +895,14 @@ impl AnchornetContract {
 
     /// Returns the sum of [`waived_fee_volume`](Self::waived_fee_volume) across every
     /// asset that has ever had liquidity provided.
-    pub fn total_waived_fee_volume(env: Env) -> i128 {
+    pub fn total_waived_fee_volume(env: Env) -> Result<i128, Error> {
         let mut total: i128 = 0;
         for asset in storage::get_asset_list(&env).iter() {
-            total += storage::get_waived_fee_volume(&env, &asset);
+            total = total
+                .checked_add(storage::get_waived_fee_volume(&env, &asset))
+                .ok_or(Error::Overflow)?;
         }
-        total
+        Ok(total)
     }
 
     /// Returns `provider`'s liquidity balance in `asset` (zero if none).
@@ -911,6 +949,24 @@ impl AnchornetContract {
     /// Returns `true` if a settlement with `id` exists.
     pub fn settlement_exists(env: Env, id: u64) -> bool {
         storage::get_settlement(&env, id).is_some()
+    }
+
+    /// Returns `true` if a settlement with `id` exists and its status is
+    /// [`SettlementStatus::Pending`]. Returns `false` (not an error) for a
+    /// missing id or any terminal-state settlement. Designed as a minimal-payload
+    /// primitive purpose-built for a keeper's hot polling path.
+    ///
+    /// Note the distinction from [`settlement_exists`](Self::settlement_exists)
+    /// (which returns true regardless of status), [`settlement`](Self::settlement)
+    /// (which errors on missing and returns the full struct), and
+    /// [`is_settlement_expired`](Self::is_settlement_expired) (which returns true
+    /// only if the settlement is pending AND past its expiry window).
+    pub fn is_settlement_pending(env: Env, id: u64) -> bool {
+        if let Some(settlement) = storage::get_settlement(&env, id) {
+            settlement.status == SettlementStatus::Pending
+        } else {
+            false
+        }
     }
 
     /// Returns up to `limit` settlements starting at id `start` (inclusive).
@@ -966,6 +1022,30 @@ impl AnchornetContract {
         while id <= count && (out.len() as u32) < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.asset == asset {
+                    out.push_back(settlement);
+                }
+            }
+            id += 1;
+        }
+        out
+    }
+
+    /// Returns up to `limit` settlements matching both `anchor` and `asset`,
+    /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
+    /// missing or non-matching ids are skipped without counting toward `limit`.
+    pub fn list_settlements_by_anchor_and_asset(
+        env: Env,
+        anchor: Address,
+        asset: Symbol,
+        start: u64,
+        limit: u32,
+    ) -> Vec<Settlement> {
+        let mut out = Vec::new(&env);
+        let count = storage::get_settlement_count(&env);
+        let mut id = if start == 0 { 1 } else { start };
+        while id <= count && (out.len() as u32) < limit {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.anchor == anchor && settlement.asset == asset {
                     out.push_back(settlement);
                 }
             }
@@ -1044,19 +1124,21 @@ impl AnchornetContract {
     /// `status`, scanning the full settlement history. Useful alongside
     /// [`settlement_count_by_status`](Self::settlement_count_by_status) for
     /// off-chain volume dashboards.
-    pub fn total_settled_amount(env: Env, status: SettlementStatus) -> i128 {
+    pub fn total_settled_amount(env: Env, status: SettlementStatus) -> Result<i128, Error> {
         let count = storage::get_settlement_count(&env);
         let mut total: i128 = 0;
         let mut id = 1;
         while id <= count {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.status == status {
-                    total += settlement.amount;
+                    total = total
+                        .checked_add(settlement.amount)
+                        .ok_or(Error::Overflow)?;
                 }
             }
-            id += 1;
+            id = id.checked_add(1).ok_or(Error::Overflow)?;
         }
-        total
+        Ok(total)
     }
 }
 
@@ -1106,114 +1188,71 @@ impl AnchornetContract {
             return Ok(());
         }
         let pool = storage::get_pool(env, asset);
-        if pool.total - amount < floor {
+        let remaining = pool.total.checked_sub(amount).ok_or(Error::Overflow)?;
+        if remaining < floor {
             return Err(Error::BelowMinLiquidity);
         }
         Ok(())
     }
 
-    /// Returns the effective protocol fee for `asset`, in basis points: its
-    /// per-asset override if one is configured, otherwise the global fee.
     fn effective_fee_bps(env: &Env, asset: &Symbol) -> u32 {
         storage::get_asset_fee(env, asset).unwrap_or_else(|| storage::get_fee_bps(env))
     }
 
-    /// Calculates `floor(amount * fee_bps / 10_000)` without overflowing the
-    /// intermediate product. Callers validate that `amount` is positive and
-    /// `fee_bps` does not exceed [`MAX_FEE_BPS`].
-    fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
+    fn calculate_fee(amount: i128, fee_bps: u32) -> Result<i128, Error> {
         let fee_bps = i128::from(fee_bps);
         let whole = (amount / BPS_DENOMINATOR)
             .checked_mul(fee_bps)
-            .expect("fee calculation overflow");
+            .ok_or(Error::Overflow)?;
         let remainder = (amount % BPS_DENOMINATOR)
             .checked_mul(fee_bps)
-            .expect("fee calculation overflow")
+            .ok_or(Error::Overflow)?
             / BPS_DENOMINATOR;
 
-        whole
-            .checked_add(remainder)
-            .expect("fee calculation overflow")
+        whole.checked_add(remainder).ok_or(Error::Overflow)
     }
 
-    /// Adds `amount` of `asset` to `provider`'s balance and the pool total,
-    /// incrementing the pool's provider count on a first contribution.
-    ///
-    /// Callers must first validate that `amount` is positive and `provider`
-    /// is a registered anchor.
-    ///
-    /// # Invariant (paired with [`Self::do_withdraw`])
-    ///
-    /// The `pool.providers` counter is paired: it is incremented here when a
-    /// balance first goes from zero to positive, and decremented in
-    /// [`Self::do_withdraw`] when a balance returns to zero. Any code path that
-    /// mutates provider balances outside these two functions must maintain the
-    /// pairing, or `do_withdraw`'s underflow guard will panic. The `checked_add`s
-    /// mirror that guard and [`Self::calculate_fee`].
-    fn do_provide(env: &Env, provider: &Address, asset: &Symbol, amount: i128) {
+    fn do_provide(
+        env: &Env,
+        provider: &Address,
+        asset: &Symbol,
+        amount: i128,
+    ) -> Result<(), Error> {
         let mut pool = storage::get_pool(env, asset);
         let prior = storage::get_balance(env, provider, asset);
         if prior == 0 {
-            pool.providers = pool
-                .providers
-                .checked_add(1)
-                .expect("pool providers overflow in do_provide");
+            pool.providers = pool.providers.checked_add(1).ok_or(Error::Overflow)?;
         }
-        pool.total = pool
-            .total
-            .checked_add(amount)
-            .expect("pool total overflow in do_provide");
-        let new_balance = prior
-            .checked_add(amount)
-            .expect("provider balance overflow in do_provide");
+        pool.total = pool.total.checked_add(amount).ok_or(Error::Overflow)?;
+        let new_balance = prior.checked_add(amount).ok_or(Error::Overflow)?;
         storage::set_pool(env, asset, &pool);
         storage::set_balance(env, provider, asset, new_balance);
         let is_new = storage::remember_asset(env, asset);
         events::liquidity_provided(env, provider, asset, amount);
         if is_new {
             events::asset_onboarded(env, asset);
-        }    }
+        }
+        Ok(())
+    }
 
-    /// Moves `amount` of `asset` out of `provider`'s balance and the pool
-    /// total, dropping the provider count if the balance reaches zero.
-    ///
-    /// Callers must first validate that `amount` is positive and does not
-    /// exceed the provider's balance (see [`Self::withdraw_liquidity`] and
-    /// [`Self::withdraw_liquidity_multi`];
-    /// [`Self::withdraw_all_liquidity`] delegates to
-    /// [`Self::withdraw_liquidity`] and is therefore an indirect caller).
-    ///
-    /// # Invariants
-    ///
-    /// `pool.providers` is only decremented for a `provider` whose balance was
-    /// previously incremented by [`Self::do_provide`] — those two calls are the
-    /// only way the counter changes. The `checked_sub`s below are
-    /// defense-in-depth: they turn a would-be underflow (which today would trap
-    /// under `overflow-checks = true`) into a clear panic message distinct from
-    /// user-facing errors, so any future refactor that violates this invariant
-    /// fails loudly instead of corrupting the fund-accounting counter silently.
-    /// This mirrors [`Self::calculate_fee`], which already guards its
-    /// arithmetic with `checked_*(...).expect(...)`.
-    fn do_withdraw(env: &Env, provider: &Address, asset: &Symbol, amount: i128) {
+    fn do_withdraw(
+        env: &Env,
+        provider: &Address,
+        asset: &Symbol,
+        amount: i128,
+    ) -> Result<(), Error> {
         let prior = storage::get_balance(env, provider, asset);
         let mut pool = storage::get_pool(env, asset);
-        pool.total = pool
-            .total
-            .checked_sub(amount)
-            .expect("pool total underflow in do_withdraw");
-        let remaining = prior
-            .checked_sub(amount)
-            .expect("provider balance underflow in do_withdraw");
+        pool.total = pool.total.checked_sub(amount).ok_or(Error::Overflow)?;
+        let remaining = prior.checked_sub(amount).ok_or(Error::Overflow)?;
         if remaining == 0 {
-            pool.providers = pool
-                .providers
-                .checked_sub(1)
-                .expect("pool providers underflow in do_withdraw");
+            pool.providers = pool.providers.checked_sub(1).ok_or(Error::Overflow)?;
         }
         storage::set_pool(env, asset, &pool);
         storage::set_balance(env, provider, asset, remaining);
 
         events::liquidity_withdrawn(env, provider, asset, amount);
+        Ok(())
     }
 }
 

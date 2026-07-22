@@ -27,10 +27,16 @@ pub fn initialized(env: &Env, admin: &Address) {
         .publish((symbol_short!("init"),), admin.clone());
 }
 
-/// Emitted when the administrator changes. Topics: `("admin",)`.
-pub fn admin_changed(env: &Env, new_admin: &Address) {
+/// Emitted when the administrator changes. Topics: `("admin", path)`, where
+/// `path` is `"direct"` for single-step transfers or `"accept"` for two-step proposals.
+pub fn admin_changed(env: &Env, new_admin: &Address, via_proposal: bool) {
+    let path = if via_proposal {
+        symbol_short!("accept")
+    } else {
+        symbol_short!("direct")
+    };
     env.events()
-        .publish((symbol_short!("admin"),), new_admin.clone());
+        .publish((symbol_short!("admin"), path), new_admin.clone());
 }
 
 /// Emitted when an admin transfer is proposed. Topics: `("propose",)`.
@@ -53,10 +59,11 @@ pub fn liquidity_provided(env: &Env, provider: &Address, asset: &Symbol, amount:
     );
 }
 
-    /// Emitted when an asset is first provided liquidity (onboarded). Topics: `(\"asset_onboarded\", asset)`.\r
-    pub fn asset_onboarded(env: \u0026Env, asset: \u0026Symbol) {\r
-        env.events().publish((symbol_short!(\"asset_onboarded\"), asset.clone()), ());\r
-    }
+/// Emitted when an asset is first provided liquidity (onboarded). Topics: `("onboarded", asset)`.
+pub fn asset_onboarded(env: &Env, asset: &Symbol) {
+    env.events()
+        .publish((symbol_short!("onboarded"), asset.clone()), ());
+}
 
 /// Emitted when liquidity is withdrawn. Topics: `("withdraw", provider, asset)`, data: `amount`.
 ///
@@ -140,6 +147,11 @@ pub fn min_liquidity_changed(env: &Env, asset: &Symbol, floor: i128) {
 pub fn operator_changed(env: &Env, operator: &Address) {
     env.events()
         .publish((symbol_short!("operator"),), operator.clone());
+}
+
+/// Emitted when the operator role is revoked. Topics: `("op_clear",)`.
+pub fn operator_cleared(env: &Env) {
+    env.events().publish((symbol_short!("op_clear"),), ());
 }
 
 /// Emitted when an asset's maximum settlement amount changes. Topics:

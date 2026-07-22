@@ -137,6 +137,11 @@ pub fn set_operator(env: &Env, operator: &Address) {
     env.storage().instance().set(&DataKey::Operator, operator);
 }
 
+/// Removes the operator address from instance storage.
+pub fn clear_operator(env: &Env) {
+    env.storage().instance().remove(&DataKey::Operator);
+}
+
 /// Returns `true` if the contract is currently paused.
 pub fn is_paused(env: &Env) -> bool {
     env.storage()
@@ -163,6 +168,9 @@ pub fn set_fee_bps(env: &Env, bps: u32) {
 /// Returns `true` if `anchor` has been registered.
 pub fn is_anchor(env: &Env, anchor: &Address) -> bool {
     let key = DataKey::Anchor(anchor.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
@@ -309,8 +317,18 @@ pub fn set_settlement(env: &Env, settlement: &Settlement) {
 }
 
 /// Returns `true` if `anchor` is exempt from protocol settlement fees.
+///
+/// Extends the entry's TTL on a successful read so that a waiver set once at
+/// onboarding and only read afterward (via `quote_fee` / `open_settlement`, the
+/// hot path) cannot silently archive between the rare admin rewrites
+/// (issue #121). The `.has` guard avoids calling `extend_ttl` on an entry that
+/// was never written, since the SDK requires the key to exist; unconfigured
+/// anchors keep returning `false` untouched.
 pub fn is_fee_waived(env: &Env, anchor: &Address) -> bool {
     let key = DataKey::FeeWaiver(anchor.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
@@ -339,8 +357,17 @@ pub fn set_settlement_expiry_ledgers(env: &Env, ledgers: u32) {
 
 /// Reads the minimum liquidity floor configured for `asset` (zero, meaning
 /// disabled, if never configured).
+///
+/// Extends the entry's TTL on a successful read so that heavily-read,
+/// rarely-updated risk configuration cannot silently archive between writes
+/// (issue #122). The `.has` guard avoids calling `extend_ttl` on an entry that
+/// was never written, since the SDK requires the key to exist; unconfigured
+/// assets keep returning `0` untouched.
 pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::MinLiquidity(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
@@ -353,8 +380,15 @@ pub fn set_min_liquidity(env: &Env, asset: &Symbol, floor: i128) {
 
 /// Reads the maximum settlement amount configured for `asset` (zero, meaning
 /// disabled, if never configured).
+///
+/// Extends the entry's TTL on a successful read (see [`get_min_liquidity`] for
+/// rationale — issue #122). The `.has` guard leaves unconfigured assets
+/// returning `0` without touching storage.
 pub fn get_max_settlement_amount(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::MaxSettlementAmount(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
@@ -366,9 +400,18 @@ pub fn set_max_settlement_amount(env: &Env, asset: &Symbol, amount: i128) {
 }
 
 /// Reads the per-asset fee override for `asset`, if one has been configured.
+///
+/// Extends the entry's TTL on a successful read (issue #122): the fee override
+/// is looked up on every fee resolution while admins reconfigure it rarely, so
+/// a long read-only period should not let it archive. Returns `None` untouched
+/// when the override is absent — there is no entry to extend in that case.
 pub fn get_asset_fee(env: &Env, asset: &Symbol) -> Option<u32> {
     let key = DataKey::AssetFee(asset.clone());
-    env.storage().persistent().get(&key)
+    let value = env.storage().persistent().get(&key);
+    if value.is_some() {
+        extend(env, &key);
+    }
+    value
 }
 
 /// Persists a per-asset fee override for `asset`.
@@ -386,8 +429,19 @@ pub fn clear_asset_fee(env: &Env, asset: &Symbol) {
 }
 
 /// Reads the accrued (uncollected) protocol fees for `asset`.
+///
+/// Extends the entry's TTL on a successful read (issue #121): accrual is read
+/// per settlement and inside `total_fees_accrued`'s loop, while writes only
+/// happen on collection, so a heavily-read entry could otherwise archive and
+/// understate collectible revenue. `total_fees_accrued` benefits automatically
+/// once this getter is fixed. The `.has` guard mirrors [`is_fee_waived`] —
+/// extending an unwritten entry would panic; unconfigured assets keep
+/// returning `0` untouched.
 pub fn get_fees_accrued(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::FeesAccrued(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
