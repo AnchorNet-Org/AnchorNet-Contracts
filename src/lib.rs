@@ -520,6 +520,24 @@ impl AnchornetContract {
         storage::get_min_liquidity(&env, &asset)
     }
 
+    /// Clears the minimum liquidity floor for `asset`, reverting to unset state.
+    /// Admin only.
+    pub fn clear_min_liquidity(env: Env, asset: Symbol) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_min_liquidity(&env, &asset);
+        events::min_liquidity_changed(&env, &asset, 0);
+        Ok(())
+    }
+
+    /// Clears the maximum settlement amount for `asset`, reverting to unset state.
+    /// Admin only.
+    pub fn clear_max_settlement_amount(env: Env, asset: Symbol) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_max_settlement_amount(&env, &asset);
+        events::max_settlement_amount_changed(&env, &asset, 0);
+        Ok(())
+    }
+
     /// Sets the maximum amount a single [`open_settlement`](Self::open_settlement)
     /// call may reserve for `asset`. A call above this cap fails with
     /// [`Error::AboveMaxSettlementAmount`]. Zero (the default) disables the

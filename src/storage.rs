@@ -421,6 +421,18 @@ pub fn set_max_settlement_amount(env: &Env, asset: &Symbol, amount: i128) {
     extend(env, &key);
 }
 
+    /// Removes the minimum liquidity floor for `asset`, reverting to unset state.
+    pub fn clear_min_liquidity(env: &Env, asset: &Symbol) {
+        let key = DataKey::MinLiquidity(asset.clone());
+        env.storage().persistent().remove(&key);
+    }
+
+    /// Removes the maximum settlement amount for `asset`, reverting to unset state.
+    pub fn clear_max_settlement_amount(env: &Env, asset: &Symbol) {
+        let key = DataKey::MaxSettlementAmount(asset.clone());
+        env.storage().persistent().remove(&key);
+    }
+
 /// Reads the per-asset fee override for `asset`, if one has been configured.
 ///
 /// Extends the entry's TTL on a successful read (issue #122): the fee override
