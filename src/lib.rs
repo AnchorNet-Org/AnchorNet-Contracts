@@ -788,6 +788,15 @@ impl AnchornetContract {
         Ok(env.ledger().sequence() >= settlement.opened_at + expiry)
     }
 
+    /// Returns the age of the settlement with `id` in ledgers elapsed since it
+    /// was opened (using the simulated ledger sequence, not wall-clock time).
+    /// Returns [`Error::SettlementNotFound`] if the settlement does not exist.
+    /// This is a complementary raw-value view to [`is_settlement_expired`](Self::is_settlement_expired).
+    pub fn settlement_age(env: Env, id: u64) -> Result<u32, Error> {
+        let settlement = storage::get_settlement(&env, id).ok_or(Error::SettlementNotFound)?;
+        Ok(env.ledger().sequence() - settlement.opened_at)
+    }
+
     /// Returns the [`Pool`] for `asset`, or [`Error::PoolNotFound`] if no
     /// liquidity has ever been provided for it.
     pub fn pool(env: Env, asset: Symbol) -> Result<Pool, Error> {

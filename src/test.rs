@@ -2704,6 +2704,40 @@ fn test_is_settlement_expired_rejects_unknown_id() {
 }
 
 #[test]
+fn test_settlement_age_zero_at_open() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    env.ledger().set_sequence_number(1234);
+    let id = client.open_settlement(&anchor, &asset, &400);
+
+    assert_eq!(client.settlement_age(&id), 0);
+}
+
+#[test]
+fn test_settlement_age_grows_with_ledger() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    env.ledger().set_sequence_number(100);
+    let id = client.open_settlement(&anchor, &asset, &400); // opened_at == 100
+
+    env.ledger().set_sequence_number(105);
+    assert_eq!(client.settlement_age(&id), 5);
+}
+
+#[test]
+fn test_settlement_age_rejects_unknown_id() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    let err = client
+        .try_settlement_age(&99)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::SettlementNotFound);
+}
+
+#[test]
 fn test_total_liquidity_all_sums_across_assets() {
     let env = Env::default();
     env.mock_all_auths();
