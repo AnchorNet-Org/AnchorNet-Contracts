@@ -4010,17 +4010,16 @@ fn test_hello() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// TTL bump-on-read tests for the risk/fee configuration getters (issue
-// #122). Each configuration getter now extends its entry's TTL on a
-// successful read, matching what its setter already does. Only the three
-// getters this issue names are covered — the sibling read-side TTL gaps in
-// get_balance / is_fee_waived / get_fees_accrued belong to their own issues.
+// TTL bump-on-read tests for the risk/fee configuration getters (issue #122)
+// and for is_fee_waived / get_fees_accrued (issue #121). Each getter now
+// extends its entry's TTL on a successful read, matching what its setter
+// already does. balance()'s read-side gap is a separate companion issue.
 //
-// Strategy: configure the value, advance the ledger far enough that the
-// entry's TTL decays below the extend threshold, snapshot the TTL, read via
-// the public getter, and confirm the read refreshed the TTL. Without the
-// fix the getter is a pure read and the TTL is unchanged, so `after > before`
-// fails; with the fix it bumps back up.
+// Strategy: configure the value via its setter, advance the ledger far enough
+// that the entry's TTL decays below the extend threshold, snapshot the TTL,
+// read via the public getter, and confirm the read refreshed the TTL. Without
+// the fix the getter is a pure read and the TTL is unchanged, so `after >
+// before` fails; with the fix it bumps back up.
 // ──────────────────────────────────────────────────────────────────────
 
 // The setter bumps TTL to BUMP_AMOUNT (30 * DAY_IN_LEDGERS) and the extend
@@ -4036,6 +4035,19 @@ fn advance_ledger(env: &Env, by: u32) {
 
 fn persistent_ttl(env: &Env, contract: &Address, key: &DataKey) -> u32 {
     env.as_contract(contract, || env.storage().persistent().get_ttl(key))
+}
+
+/// Seeds a real `FeesAccrued` entry for `asset` by executing a settlement with
+/// a non-zero fee on a non-waived anchor, and returns the accrued amount.
+fn seed_fees_accrued(
+    client: &AnchornetContractClient<'_>,
+    anchor: &Address,
+    asset: &Symbol,
+) -> i128 {
+    client.set_fee(&100); // 1%
+    let id = client.open_settlement(anchor, asset, &400);
+    client.execute_settlement(&id);
+    client.fees_accrued(asset)
 }
 
 #[test]
@@ -4062,6 +4074,25 @@ fn test_min_liquidity_read_bumps_ttl() {
 }
 
 #[test]
+fn test_is_fee_waived_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    client.set_fee_waiver(&anchor, &true);
+
+    let key = DataKey::FeeWaiver(anchor.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert!(client.is_fee_waived(&anchor));
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "is_fee_waived read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
 fn test_max_settlement_amount_read_bumps_ttl() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4084,6 +4115,25 @@ fn test_max_settlement_amount_read_bumps_ttl() {
 }
 
 #[test]
+fn test_get_fees_accrued_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    assert!(seed_fees_accrued(&client, &anchor, &asset) > 0);
+
+    let key = DataKey::FeesAccrued(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    assert_eq!(client.fees_accrued(&asset), 4);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "fees_accrued read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
 fn test_asset_fee_read_bumps_ttl() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4102,6 +4152,28 @@ fn test_asset_fee_read_bumps_ttl() {
     assert!(
         after > before,
         "asset_fee read did not bump TTL: before={before}, after={after}",
+    );
+}
+
+#[test]
+fn test_total_fees_accrued_bumps_each_asset_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    assert!(seed_fees_accrued(&client, &anchor, &asset) > 0);
+
+    let key = DataKey::FeesAccrued(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // total_fees_accrued iterates over get_fees_accrued — the cascade must bump
+    // each per-asset entry's TTL (acceptance criteria: "Verify total_fees_accrued
+    // benefits automatically once fixed").
+    let _ = client.total_fees_accrued();
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "total_fees_accrued did not cascade the TTL bump to the per-asset entry: before={before}, after={after}",
     );
 }
 
@@ -4135,6 +4207,32 @@ fn test_min_liquidity_repeated_reads_keep_ttl_fresh() {
 }
 
 #[test]
+fn test_is_fee_waived_repeated_reads_keep_ttl_fresh() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    client.set_fee_waiver(&anchor, &true);
+
+    let key = DataKey::FeeWaiver(anchor.clone());
+
+    // Sustained "set once, read constantly" scenario from the issue's security
+    // notes: each read over an advancing ledger should refresh the TTL, so the
+    // waiver never drifts toward archival.
+    for _ in 0..2 {
+        advance_ledger(&env, TTL_DECAY_LEDGERS);
+        let _ = client.is_fee_waived(&anchor);
+    }
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+    let _ = client.is_fee_waived(&anchor);
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "repeated reads did not keep TTL fresh: before={before}, after={after}",
+    );
+}
+
+#[test]
 fn test_min_liquidity_read_on_unconfigured_asset_is_safe() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4158,4 +4256,26 @@ fn test_asset_fee_read_on_unconfigured_asset_is_safe() {
     // No override configured: `get_asset_fee` returns `None` without trying to
     // extend an absent entry, so the effective fee falls back to the global fee.
     assert_eq!(client.asset_fee(&asset), client.fee());
+}
+
+#[test]
+fn test_is_fee_waived_read_on_unconfigured_anchor_is_safe() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+
+    // Anchor registered but no waiver ever set: the `.has` guard must skip
+    // `extend_ttl` (which would panic on an absent key) and the getter must
+    // still return the `false` default.
+    assert!(!client.is_fee_waived(&anchor));
+}
+
+#[test]
+fn test_get_fees_accrued_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    // An asset that never accrued fees has no FeesAccrued entry: the getter
+    // returns `0` without trying to extend an absent entry.
+    let never_settled = symbol_short!("EURC");
+    assert_eq!(client.fees_accrued(&never_settled), 0);
 }
