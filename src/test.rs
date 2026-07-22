@@ -3416,6 +3416,77 @@ fn test_withdraw_liquidity_multi_respects_min_liquidity_floor() {
 }
 
 #[test]
+fn test_withdraw_liquidity_multi_zero_mutations_on_late_failures() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+    let asset3 = symbol_short!("AST3");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    client.provide_liquidity(&anchor, &asset1, &1000);
+    client.provide_liquidity(&anchor, &asset2, &1000);
+    client.provide_liquidity(&anchor, &asset3, &1000);
+
+    client.set_min_liquidity(&asset3, &800);
+
+    let bal1_before = client.balance(&anchor, &asset1);
+    let bal2_before = client.balance(&anchor, &asset2);
+    let bal3_before = client.balance(&anchor, &asset3);
+    let total1_before = client.total_liquidity(&asset1);
+    let total2_before = client.total_liquidity(&asset2);
+    let total3_before = client.total_liquidity(&asset3);
+
+    // 1. Late failure: insufficient balance on third asset
+    let reqs_insufficient = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 100),
+        (asset3.clone(), 2000),
+    ];
+    let err_insuf = client
+        .try_withdraw_liquidity_multi(&anchor, &reqs_insufficient)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_insuf, Error::InsufficientLiquidity);
+
+    // Verify state unchanged
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.balance(&anchor, &asset3), bal3_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.total_liquidity(&asset3), total3_before);
+
+    // 2. Late failure: below min liquidity on third asset
+    let reqs_min = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 100),
+        (asset3.clone(), 300),
+    ];
+    let err_min = client
+        .try_withdraw_liquidity_multi(&anchor, &reqs_min)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_min, Error::BelowMinLiquidity);
+
+    // Verify state unchanged again
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.balance(&anchor, &asset3), bal3_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.total_liquidity(&asset3), total3_before);
+}
+
+#[test]
 fn test_provide_liquidity_multi_funds_every_asset() {
     let env = Env::default();
     env.mock_all_auths();
