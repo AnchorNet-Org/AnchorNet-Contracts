@@ -132,6 +132,45 @@ operator; the operator role is scoped to this one lifecycle switch and
 carries no ability to change the fee, the admin, or any other admin-only
 setting.
 
+#### Operator permission boundary
+
+The table below lists **every gated entrypoint** and which guard function
+it calls in [`src/lib.rs`](src/lib.rs), so integrators and delegates can
+verify the boundary without reading individual doc comments.
+
+**`require_admin_or_operator` — admin _or_ operator may call**
+
+| Entrypoint | Description |
+|---|---|
+| `pause(caller)` | Halt liquidity & settlement mutations |
+| `unpause(caller)` | Resume after a pause |
+| `extend_instance_ttl(caller)` | Extend contract instance/code TTL |
+
+**`require_admin` — admin only (operator excluded)**
+
+| Entrypoint | Description |
+|---|---|
+| `set_admin(new_admin)` | Transfer administration (single-step) |
+| `propose_admin(candidate)` | Initiate a two-step admin transfer |
+| `set_operator(operator)` | Appoint or replace the operator |
+| `register_anchor(anchor)` | Approve a new liquidity provider |
+| `register_anchors(anchors)` | Batch-approve liquidity providers |
+| `deregister_anchor(anchor)` | Remove an anchor from the approved set |
+| `set_fee(bps)` | Set the global protocol fee |
+| `set_asset_fee(asset, bps)` | Override the fee for one asset |
+| `clear_asset_fee(asset)` | Remove an asset's fee override |
+| `set_fee_waiver(anchor, waived)` | Grant or revoke a fee waiver |
+| `collect_fees(asset)` | Collect accrued protocol fees |
+| `set_min_liquidity(asset, floor)` | Set the minimum liquidity floor |
+| `set_max_settlement_amount(asset, amount)` | Cap per-settlement reserve size |
+| `set_settlement_expiry_ledgers(ledgers)` | Set the settlement expiry window |
+| `execute_settlement(id)` | Finalize a pending settlement |
+
+> **Note:** The three-entry `require_admin_or_operator` list and the
+> fifteen-entry `require_admin` list are derived directly from the
+> corresponding call sites in `src/lib.rs`. When a new entrypoint is added,
+> check which guard it calls and update this table accordingly.
+
 ### Events
 
 - `("init",)` – contract initialized
