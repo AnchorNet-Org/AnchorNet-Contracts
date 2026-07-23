@@ -310,7 +310,6 @@ fn test_provider_share_bps_zero_liquidity() {
     assert_eq!(client.provider_share_bps(&anchor, &asset), 0);
 }
 
-
 #[test]
 fn test_set_admin_transfers_control() {
     let env = Env::default();
@@ -1265,10 +1264,19 @@ fn test_list_settlements_by_anchor_and_asset_empty_for_unknown() {
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10).len(), 0);
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10)
+            .len(),
+        0
+    );
 }
-
 
 #[test]
 fn test_version() {
@@ -2369,8 +2377,22 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    assert_operator_rejected!(env, client, operator, "pause", (), client.try_pause(&operator));
-    assert_operator_rejected!(env, client, operator, "unpause", (), client.try_unpause(&operator));
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "pause",
+        (),
+        client.try_pause(&operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "unpause",
+        (),
+        client.try_unpause(&operator)
+    );
     assert_operator_rejected!(
         env,
         client,
@@ -2379,7 +2401,7 @@ fn test_clear_operator() {
         (),
         client.try_extend_instance_ttl(&operator)
     );
-    
+
     // Admin can still act
     client.pause(&admin);
     assert!(client.is_paused());
@@ -2926,11 +2948,7 @@ fn test_settlement_age_rejects_unknown_id() {
     let env = Env::default();
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
-    let err = client
-        .try_settlement_age(&99)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_settlement_age(&99).err().unwrap().unwrap();
     assert_eq!(err, Error::SettlementNotFound);
 }
 
@@ -4363,7 +4381,9 @@ fn test_list_settlements_by_anchor_and_asset_start_past_end_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10)
+            .len(),
         0
     );
     assert_eq!(
@@ -4381,11 +4401,15 @@ fn test_list_settlements_by_anchor_and_asset_limit_zero_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0)
+            .len(),
         0
     );
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0)
+            .len(),
         0
     );
 }
