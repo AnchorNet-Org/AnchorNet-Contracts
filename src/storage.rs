@@ -414,6 +414,24 @@ pub fn get_max_settlement_amount(env: &Env, asset: &Symbol) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
+/// Returns `true` if the maximum settlement amount for `asset` has ever been
+/// explicitly configured, including when it was configured to zero to disable
+/// the cap.
+///
+/// This distinguishes the default "never configured" zero returned by
+/// [`get_max_settlement_amount`] from an administrator's explicit
+/// `set_max_settlement_amount(asset, 0)` action. When present, the entry's TTL
+/// is extended just like the value getter so read-only audit checks keep the
+/// risk-parameter record alive.
+pub fn has_max_settlement_amount(env: &Env, asset: &Symbol) -> bool {
+    let key = DataKey::MaxSettlementAmount(asset.clone());
+    let configured = env.storage().persistent().has(&key);
+    if configured {
+        extend(env, &key);
+    }
+    configured
+}
+
 /// Persists the maximum settlement amount for `asset`.
 pub fn set_max_settlement_amount(env: &Env, asset: &Symbol, amount: i128) {
     let key = DataKey::MaxSettlementAmount(asset.clone());
