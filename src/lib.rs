@@ -1,3 +1,4 @@
+#![no_std]
 //! AnchorNet Soroban smart contracts.
 //!
 //! This crate contains on-chain logic for the AnchorNet liquidity coordination
@@ -1033,7 +1034,7 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
-    pub fn list_settlements_by_anchor_and_asset(
+    pub fn list_settlements_by_anch_asset(
         env: Env,
         anchor: Address,
         asset: Symbol,
@@ -1079,6 +1080,25 @@ impl AnchornetContract {
             id += 1;
         }
         out
+    }
+
+    /// Returns the lowest id (which is also the oldest by `opened_at`, as ids
+    /// are assigned sequentially) among currently `Pending` settlements for
+    /// `asset`. Returns `None` if no pending settlement exists for the asset.
+    /// This is intended for off-chain keepers to find the oldest settlement
+    /// to check for expiration via `cancel_expired_settlement`.
+    pub fn oldest_pending_settlement_id(env: Env, asset: Symbol) -> Option<u64> {
+        let count = storage::get_settlement_count(&env);
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.asset == asset && settlement.status == SettlementStatus::Pending {
+                    return Some(id);
+                }
+            }
+            id += 1;
+        }
+        None
     }
 
     /// Returns the accrued (uncollected) protocol fees for `asset`.
