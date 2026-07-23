@@ -872,6 +872,20 @@ impl AnchornetContract {
         storage::get_balance(&env, &provider, &asset)
     }
 
+    /// Returns the provider's share of the pool for `asset` expressed in basis points.
+    ///
+    /// The calculation is `balance * BPS_DENOMINATOR / total_liquidity`.
+    /// Returns `0` when `total_liquidity` is `0` to avoid division‑by‑zero panics.
+    /// The division uses floor rounding, matching the rounding used in `quote_fee`.
+    pub fn provider_share_bps(env: Env, provider: Address, asset: Symbol) -> i128 {
+        let balance = storage::get_balance(&env, &provider, &asset);
+        let total = storage::get_pool(&env, &asset).total;
+        if total == 0 {
+            return 0;
+        }
+        balance * BPS_DENOMINATOR / total
+    }
+
     /// Returns up to `limit` of `provider`'s non-zero balances, as
     /// `(asset, balance)` pairs, scanning
     /// [`list_assets`](Self::list_assets) starting at index `start`. Spares
