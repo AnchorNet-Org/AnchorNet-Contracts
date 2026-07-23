@@ -3243,6 +3243,96 @@ fn test_clear_asset_fee_reverts_to_global() {
     assert_eq!(client.asset_fee(&asset), 100);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: clearing an asset fee override reverts to the global rate in
+// effect *at clear time*, not the one in effect when the override was set
+// (issue #143).
+//
+// `effective_fee_bps` resolves the rate live — `get_asset_fee(asset)` falling
+// back to `get_fee_bps()` — and `clear_asset_fee` simply removes the override
+// entry, so nothing is ever cached. The test above cannot detect a regression
+// on that point: it never changes the global rate between setting and
+// clearing the override, so an implementation that restored the rate
+// remembered at override time would produce the same number and stay green.
+//
+// The two tests below insert a global fee change into that window, covering
+// the read side (`asset_fee` / `quote_fee`) and the settlement side
+// (`open_settlement` stamp and `execute_settlement` accrual), which resolve
+// the rate through the same path and must therefore agree.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_clear_asset_fee_reverts_to_latest_global_fee() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    // Global 1%, then a 5% override for this asset.
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &500);
+    assert_eq!(client.asset_fee(&asset), 500);
+
+    // The global moves to 3% while the override is still active: the
+    // override keeps winning, and it is not disturbed by the change.
+    client.set_fee(&300);
+    assert_eq!(
+        client.asset_fee(&asset),
+        500,
+        "an active override must survive a change to the global fee",
+    );
+    assert_eq!(client.fee(), 300);
+
+    client.clear_asset_fee(&asset);
+
+    // The asset falls back to the *current* global rate (3%), not to the 1%
+    // that was in effect when the override was set.
+    assert_eq!(
+        client.asset_fee(&asset),
+        300,
+        "cleared override must revert to the global fee at clear time",
+    );
+    assert_eq!(
+        client.quote_fee(&asset, &1_000),
+        30,
+        "quote_fee must price against the same live rate as asset_fee",
+    );
+}
+
+#[test]
+fn test_clear_asset_fee_charges_latest_global_fee_on_settlement() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &500);
+    client.set_fee(&300);
+    client.clear_asset_fee(&asset);
+
+    // Everything downstream of the clear must price at the current global
+    // rate: the quote, the fee stamped onto the settlement at open, and the
+    // amount actually accrued at execution.
+    let amount = 10_000i128;
+    let quoted = client.quote_fee(&asset, &amount);
+    assert_eq!(
+        quoted, 300,
+        "settlement must be quoted at the global fee in effect at clear time",
+    );
+
+    let id = client.open_settlement(&anchor, &asset, &amount);
+    assert_eq!(
+        client.settlement(&id).fee,
+        quoted,
+        "the fee stamped at open must match the quote",
+    );
+
+    let accrued_before = client.fees_accrued(&asset);
+    client.execute_settlement(&id);
+    assert_eq!(
+        client.fees_accrued(&asset) - accrued_before,
+        quoted,
+        "accrual must match the quote, confirming a single live fee resolution",
+    );
+}
+
 #[test]
 fn test_asset_fee_override_is_per_asset() {
     let env = Env::default();
