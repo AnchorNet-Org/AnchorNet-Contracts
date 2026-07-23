@@ -1227,10 +1227,19 @@ fn test_list_settlements_by_anchor_and_asset_empty_for_unknown() {
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10).len(), 0);
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10)
+            .len(),
+        0
+    );
 }
-
 
 #[test]
 fn test_version() {
@@ -1500,6 +1509,87 @@ fn test_list_anchors_reflects_reregistration() {
     let anchors = client.list_anchors(&0, &10);
     assert_eq!(anchors.len(), 1);
     assert_eq!(anchors.get(0).unwrap(), anchor);
+}
+
+/// Regression test for deregister/re-register cycle preserving balance and
+/// pool.providers state (no double-count, no reset, funds remain withdrawable).
+///
+/// Per `deregister_anchor` doc: "Existing pool liquidity is unaffected; the
+/// anchor simply cannot open new positions".
+///
+/// Covers acceptance criteria:
+/// - balances / anchor_balances / pool.providers unchanged across deregister
+/// - re-register does not reset or double-count
+/// - immediate withdraw after re-register succeeds
+/// - provide_liquidity and open_settlement blocked while deregistered
+#[test]
+fn test_deregister_re_register_preserves_balances_and_provider_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Initial state
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Deregister — balances and provider count unaffected
+    client.deregister_anchor(&anchor);
+    assert!(!client.is_anchor(&anchor));
+
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Cannot provide or open settlement while deregistered (AnchorNotRegistered)
+    let err_provide = client
+        .try_provide_liquidity(&anchor, &asset, &100)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_provide, Error::AnchorNotRegistered);
+
+    let err_settle = client
+        .try_open_settlement(&anchor, &asset, &100)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_settle, Error::AnchorNotRegistered);
+
+    // Re-register the same anchor
+    client.register_anchor(&anchor);
+    assert!(client.is_anchor(&anchor));
+
+    // State must be exactly as before deregistration (no reset, no double-count)
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Anchor can immediately withdraw its preserved balance (no need to re-provide)
+    let withdrawn = client.withdraw_all_liquidity(&anchor, &asset);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(client.balance(&anchor, &asset), 0);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 0);
+    assert_eq!(pool.providers, 0);
 }
 
 #[test]
@@ -2331,8 +2421,22 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    assert_operator_rejected!(env, client, operator, "pause", (), client.try_pause(&operator));
-    assert_operator_rejected!(env, client, operator, "unpause", (), client.try_unpause(&operator));
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "pause",
+        (),
+        client.try_pause(&operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "unpause",
+        (),
+        client.try_unpause(&operator)
+    );
     assert_operator_rejected!(
         env,
         client,
@@ -2341,7 +2445,7 @@ fn test_clear_operator() {
         (),
         client.try_extend_instance_ttl(&operator)
     );
-    
+
     // Admin can still act
     client.pause(&admin);
     assert!(client.is_paused());
@@ -2888,11 +2992,7 @@ fn test_settlement_age_rejects_unknown_id() {
     let env = Env::default();
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
-    let err = client
-        .try_settlement_age(&99)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_settlement_age(&99).err().unwrap().unwrap();
     assert_eq!(err, Error::SettlementNotFound);
 }
 
@@ -4325,7 +4425,9 @@ fn test_list_settlements_by_anchor_and_asset_start_past_end_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10)
+            .len(),
         0
     );
     assert_eq!(
@@ -4343,11 +4445,15 @@ fn test_list_settlements_by_anchor_and_asset_limit_zero_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0)
+            .len(),
         0
     );
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0)
+            .len(),
         0
     );
 }
