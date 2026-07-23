@@ -84,6 +84,26 @@ impl AnchornetContract {
     /// Returns [`Error::InvalidAdminCandidate`] if `candidate` is the same as
     /// the current administrator, since a no-op proposal would produce events
     /// with no actual authority change.
+    ///
+    /// # A pending proposal grants and removes nothing
+    ///
+    /// This writes only the pending-admin entry. Administrative authority is
+    /// resolved live from the admin entry on every call, so for as long as the
+    /// proposal is outstanding:
+    ///
+    /// - the current administrator keeps **unrestricted** authority, including
+    ///   the ability to call `propose_admin` again and redirect or effectively
+    ///   withdraw the proposal; and
+    /// - `candidate` gains **no** authority whatsoever beyond
+    ///   [`accept_admin`](Self::accept_admin).
+    ///
+    /// This is deliberate. Freezing any part of the current administrator's
+    /// authority while a proposal is pending would let a transfer to an
+    /// unreachable or unresponsive candidate strand the contract without a
+    /// fully capable admin, turning a routine handover into a denial of
+    /// service. Authority moves in a single step, when
+    /// [`accept_admin`](Self::accept_admin) succeeds, and not before.
+    /// Regression tests lock in all three phases (see `test.rs`, issue #130).
     pub fn propose_admin(env: Env, candidate: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
         if candidate == storage::get_admin(&env) {
