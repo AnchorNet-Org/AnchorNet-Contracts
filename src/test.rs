@@ -4421,6 +4421,72 @@ fn test_list_settlements_by_status_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.get(1).unwrap().id, id2);
 }
 
+#[test]
+fn test_list_settlements_beyond_count() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    let count = client.settlement_count();
+    assert_eq!(count, 2);
+
+    let start_beyond = 100u64;
+
+    assert_eq!(client.list_settlements(&start_beyond, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &start_beyond, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &start_beyond, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &start_beyond, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_off_by_one_boundary() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    let count = client.settlement_count();
+    assert_eq!(count, 2);
+
+    let start_boundary = count + 1;
+
+    assert_eq!(client.list_settlements(&start_boundary, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &start_boundary, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &start_boundary, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &start_boundary, &10)
+            .len(),
+        0
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Property-based tests for settlement aggregate consistency
 //
