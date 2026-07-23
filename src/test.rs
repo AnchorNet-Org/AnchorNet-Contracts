@@ -1538,6 +1538,105 @@ fn test_propose_admin_overwrites_prior_proposal() {
     assert_eq!(err, Error::NotPendingAdmin);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: a second `propose_admin` supersedes the first candidate
+// (issue #131).
+//
+// `propose_admin` writes `PendingAdmin` unconditionally: there is no
+// `has_pending_admin` guard and no dedicated "superseded" event, so a second
+// proposal silently replaces the first. That last-write-wins shape, with no
+// queue, is intentional — it is how an administrator corrects a mistyped
+// candidate, and requiring an explicit cancel first would leave a bad
+// proposal stuck. It should not be "fixed" into a rejection.
+//
+// `test_propose_admin_overwrites_prior_proposal` above already pins the state
+// half: `pending_admin` reports the second candidate and the first is turned
+// away with `NotPendingAdmin`. What it leaves uncovered is that the supersede
+// hands off a still-working transfer, and that each proposal announced itself
+// on the event stream. An implementation that coalesced the two calls into a
+// single event, or that left the second candidate unable to accept, passes
+// the state-only assertions and fails here.
+//
+// Events are captured after each call because `events().all()` reflects only
+// the most recent top-level invocation (see the note in
+// `test_set_admin_emits_admin_changed_event`). Reading it once after both
+// proposals would return the second event alone and prove nothing about the
+// first.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_second_propose_admin_supersedes_first_and_emits_both_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // The first proposal announces `first` on the event stream.
+    client.propose_admin(&first);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("propose"),).into_val(&env),
+                first.clone().into_val(&env),
+            ),
+        ],
+        "the first propose_admin must emit admin_proposed for the first candidate"
+    );
+    assert_eq!(client.pending_admin(), first);
+
+    // The second proposal announces `second` with its own event, rather than
+    // being coalesced into the first or suppressed as a redundant proposal.
+    client.propose_admin(&second);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("propose"),).into_val(&env),
+                second.clone().into_val(&env),
+            ),
+        ],
+        "the second propose_admin must emit its own admin_proposed event"
+    );
+
+    // The pending entry now names the second candidate alone.
+    assert_eq!(client.pending_admin(), second);
+
+    // The superseded candidate is left with no dangling authorized path.
+    // `accept_admin` resolves the pending entry before `require_auth`, so this
+    // is a contract-level rejection and not an authorization failure.
+    let err = client.try_accept_admin(&first).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotPendingAdmin);
+
+    // Authority has not moved yet: superseding a proposal is not a transfer.
+    assert_eq!(client.admin(), admin);
+
+    // The proposal is still live for the second candidate and completes.
+    client.accept_admin(&second);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("admin"), symbol_short!("accept")).into_val(&env),
+                second.clone().into_val(&env),
+            ),
+        ],
+        "accept_admin must emit admin_changed via the proposal path"
+    );
+    assert_eq!(client.admin(), second);
+    let err = client.try_pending_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoPendingAdmin);
+}
+
 #[test]
 fn test_propose_admin_rejects_current_admin() {
     let env = Env::default();
