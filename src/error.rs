@@ -60,4 +60,6 @@ pub enum Error {
     DuplicateAssetInBatch = 20,
     /// The proposed administrator is the same as the current administrator.
     InvalidAdminCandidate = 21,
+    /// Arithmetic overflow or underflow occurred.
+    Overflow = 22,
 }
