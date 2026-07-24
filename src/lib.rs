@@ -1120,6 +1120,25 @@ impl AnchornetContract {
         total
     }
 
+    /// Returns the total number of settlements ever opened by `anchor`,
+    /// scanning the full settlement history (O(n) cost, same as
+    /// [`settlement_count_by_status`](Self::settlement_count_by_status)).
+    /// Returns 0 for an anchor that has never opened a settlement.
+    pub fn anchor_settlement_count(env: Env, anchor: Address) -> u64 {
+        let count = storage::get_settlement_count(&env);
+        let mut total: u64 = 0;
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.anchor == anchor {
+                    total += 1;
+                }
+            }
+            id += 1;
+        }
+        total
+    }
+
     /// Returns the sum of `amount` across every settlement currently in
     /// `status`, scanning the full settlement history. Useful alongside
     /// [`settlement_count_by_status`](Self::settlement_count_by_status) for
