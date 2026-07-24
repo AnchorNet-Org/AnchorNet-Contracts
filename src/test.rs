@@ -3860,6 +3860,127 @@ fn test_provide_liquidity_multi_blocked_while_paused() {
     assert_eq!(err, Error::Paused);
 }
 
+// ---------------------------------------------------------------------------
+// provide_liquidity_multi atomicity regression tests
+//
+// The existing test_provide_liquidity_multi_rejects_duplicate_asset test only
+// covers the case where the duplicate is at the front of the batch (both
+// entries are the same asset). These regression tests verify that an invalid
+// entry appearing *later* in the requests vector — after several valid distinct
+// assets — causes zero mutations across the entire batch, including the valid
+// entries that appeared before the invalid one. This enforces the all-or-nothing
+// atomicity guarantee that provide_liquidity_multi's doc comment promises.
+// ---------------------------------------------------------------------------
+
+/// Regression test: an invalid entry (duplicate asset) appearing *later* in the
+/// batch — after several valid distinct assets — must cause zero mutations across
+/// the entire batch, including the valid entries that appeared before the invalid
+/// one. Without the two-pass validate-then-apply design, the first two legs could
+/// be partially applied before the duplicate is detected on the third.
+#[test]
+fn test_provide_liquidity_multi_zero_mutations_on_late_duplicate_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Snapshot balances and pool totals for every affected asset before the
+    // call. All are zero since no liquidity has been provided yet.
+    let bal1_before = client.balance(&anchor, &asset1);
+    let bal2_before = client.balance(&anchor, &asset2);
+    let total1_before = client.total_liquidity(&asset1);
+    let total2_before = client.total_liquidity(&asset2);
+    let providers1_before = client.pool(&asset1).providers;
+    let providers2_before = client.pool(&asset2).providers;
+
+    // First two entries are valid distinct assets; third is a duplicate of the
+    // first — the invalid entry appears *after* valid ones.
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 200),
+        (asset1.clone(), 300), // duplicate of asset1
+    ];
+    let err = client
+        .try_provide_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateAssetInBatch);
+
+    // Verify state unchanged for every asset in the batch — including the valid
+    // ones (asset1, asset2) that appeared before the invalid entry.
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.pool(&asset1).providers, providers1_before);
+    assert_eq!(client.pool(&asset2).providers, providers2_before);
+}
+
+/// Regression test: an invalid entry (non-positive amount) appearing *later* in
+/// the batch — after several valid distinct assets — must cause zero mutations
+/// across the entire batch, including the valid entries that appeared before the
+/// invalid one. The non-positive amount is detected at a different point in the
+/// validation loop than the duplicate-asset check, so it is covered separately.
+#[test]
+fn test_provide_liquidity_multi_zero_mutations_on_late_nonpositive_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+    let asset3 = symbol_short!("AST3");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Snapshot balances and pool totals for every affected asset before the
+    // call. All are zero since no liquidity has been provided yet.
+    let bal1_before = client.balance(&anchor, &asset1);
+    let bal2_before = client.balance(&anchor, &asset2);
+    let bal3_before = client.balance(&anchor, &asset3);
+    let total1_before = client.total_liquidity(&asset1);
+    let total2_before = client.total_liquidity(&asset2);
+    let total3_before = client.total_liquidity(&asset3);
+    let providers1_before = client.pool(&asset1).providers;
+    let providers2_before = client.pool(&asset2).providers;
+    let providers3_before = client.pool(&asset3).providers;
+
+    // First two entries are valid distinct assets; third has a non-positive
+    // amount — the invalid entry appears *after* valid ones.
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 200),
+        (asset3.clone(), 0), // non-positive amount
+    ];
+    let err = client
+        .try_provide_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    // Verify state unchanged for every asset in the batch — including the valid
+    // ones (asset1, asset2) that appeared before the invalid entry.
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.balance(&anchor, &asset3), bal3_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.total_liquidity(&asset3), total3_before);
+    assert_eq!(client.pool(&asset1).providers, providers1_before);
+    assert_eq!(client.pool(&asset2).providers, providers2_before);
+    assert_eq!(client.pool(&asset3).providers, providers3_before);
+}
+
 #[test]
 fn test_total_settled_amount_sums_by_status() {
     let env = Env::default();
