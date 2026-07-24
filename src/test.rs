@@ -1693,6 +1693,7 @@ fn test_settlement_expiry_disabled_by_default() {
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
     assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
 }
 
 #[test]
@@ -1702,9 +1703,12 @@ fn test_set_settlement_expiry_ledgers_updates_value() {
     let (client, admin) = setup(&env);
     client.initialize(&admin);
 
+    assert!(!client.is_settlement_expiry_configured());
+
     client.set_settlement_expiry_ledgers(&100);
 
     assert_eq!(client.settlement_expiry_ledgers(), 100);
+    assert!(client.is_settlement_expiry_configured());
 }
 
 #[test]
@@ -1713,9 +1717,13 @@ fn test_cancel_expired_settlement_disabled_by_default() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     let id = client.open_settlement(&anchor, &asset, &400);
 
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
+
     // Expiry is disabled (zero) by default, no matter how far the ledger
     // advances.
     env.ledger().set_sequence_number(1_000_000);
+    assert!(!client.is_settlement_expired(&id));
     let err = client
         .try_cancel_expired_settlement(&id)
         .err()
@@ -2796,8 +2804,15 @@ fn test_settlement_expiry_disabled_at_zero() {
     env.mock_all_auths();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
-    // Explicitly set expiry to 0 (disabling it)
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
+
+    // Explicitly set expiry to 0 (disabling it). This must be distinguishable
+    // from the never-configured state even though both report a zero window.
     client.set_settlement_expiry_ledgers(&0);
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(client.is_settlement_expiry_configured());
+
     let id = client.open_settlement(&anchor, &asset, &400);
 
     // Advance the ledger sequence arbitrarily far in the future

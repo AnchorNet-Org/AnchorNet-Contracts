@@ -303,6 +303,13 @@ impl AnchornetContract {
         storage::get_settlement_expiry_ledgers(&env)
     }
 
+    /// Returns `true` if the settlement expiry window has been explicitly
+    /// configured by the admin, including an explicit zero value that disables
+    /// expiry. Returns `false` only when the expiry window has never been set.
+    pub fn is_settlement_expiry_configured(env: Env) -> bool {
+        storage::has_settlement_expiry_ledgers(&env)
+    }
+
     /// Returns up to `limit` currently registered anchors that hold an active
     /// fee waiver, in registration order, scanning the registration history
     /// starting at list index `start` (0-based). Mirrors

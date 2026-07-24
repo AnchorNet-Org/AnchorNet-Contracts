@@ -361,6 +361,14 @@ pub fn set_fee_waiver(env: &Env, anchor: &Address, waived: bool) {
     extend(env, &key);
 }
 
+/// Returns `true` if the settlement expiry window has been explicitly
+/// configured, including an explicit zero value that disables expiry.
+pub fn has_settlement_expiry_ledgers(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .has(&DataKey::SettlementExpiryLedgers)
+}
+
 /// Reads the settlement expiry window in ledgers (zero if never configured,
 /// meaning settlements never expire).
 pub fn get_settlement_expiry_ledgers(env: &Env) -> u32 {
