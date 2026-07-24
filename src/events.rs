@@ -89,6 +89,12 @@ pub fn fee_changed(env: &Env, bps: u32) {
     env.events().publish((symbol_short!("fee"),), bps);
 }
 
+/// Emitted when the contract instance and code TTL are extended.
+/// Topics: `("ttl",)`.
+pub fn instance_ttl_extended(env: &Env) {
+    env.events().publish((symbol_short!("ttl"),), ());
+}
+
 /// Emitted when an anchor is deregistered. Topics: `("deanchor", anchor)`.
 pub fn anchor_removed(env: &Env, anchor: &Address) {
     env.events()

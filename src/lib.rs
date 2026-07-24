@@ -189,6 +189,7 @@ impl AnchornetContract {
     pub fn extend_instance_ttl(env: Env, caller: Address) -> Result<(), Error> {
         Self::require_admin_or_operator(&env, &caller)?;
         storage::extend_instance_ttl(&env);
+        events::instance_ttl_extended(&env);
         Ok(())
     }
 
@@ -223,10 +224,7 @@ impl AnchornetContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Self::calculate_fee(
-            amount,
-            Self::effective_fee_bps(&env, &asset),
-        )
+        Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))
     }
 
     /// Grants or revokes a protocol fee waiver for `anchor`. While waived,
@@ -725,7 +723,10 @@ impl AnchornetContract {
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
+        pool.total = pool
+            .total
+            .checked_add(settlement.amount)
+            .ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Cancelled;
@@ -776,7 +777,10 @@ impl AnchornetContract {
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
+        pool.total = pool
+            .total
+            .checked_add(settlement.amount)
+            .ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Expired;
@@ -1033,7 +1037,7 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
-    pub fn list_settlements_by_anchor_and_asset(
+    pub fn list_settlements_by_anchor_asset(
         env: Env,
         anchor: Address,
         asset: Symbol,
