@@ -34,6 +34,44 @@ macro_rules! assert_operator_rejected {
     }};
 }
 
+/// Asserts that `caller` is turned away by a *contract-level*
+/// [`Error::NotAuthorized`] rather than a host authorization failure.
+///
+/// [`assert_operator_rejected`] covers strict admin-only entrypoints, where
+/// `require_admin` asks for the admin's signature and the host aborts the
+/// invocation. The shared-authority entrypoints (`pause`, `unpause`,
+/// `extend_instance_ttl`) instead run `require_admin_or_operator`, which
+/// rejects an address that is neither admin nor the appointed operator and
+/// returns `NotAuthorized` *before* ever reaching `caller.require_auth()`.
+/// That is a contract error, so it must be matched as one.
+macro_rules! assert_caller_unauthorized {
+    ($env:ident, $client:ident, $caller:ident, $fn_name:literal, $args:expr, $call:expr) => {{
+        $env.set_auths(&[MockAuth {
+            address: &$caller,
+            invoke: &MockAuthInvoke {
+                contract: &$client.address,
+                fn_name: $fn_name,
+                args: $args.into_val(&$env),
+                sub_invokes: &[],
+            },
+        }
+        .into()]);
+
+        let failure = $call
+            .err()
+            .expect(concat!($fn_name, " unexpectedly accepted the caller"));
+        assert_eq!(
+            failure.expect(concat!(
+                $fn_name,
+                " aborted at the host instead of returning NotAuthorized"
+            )),
+            Error::NotAuthorized,
+            "{} rejected the caller with an unexpected error",
+            $fn_name
+        );
+    }};
+}
+
 fn setup(env: &Env) -> (AnchornetContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, AnchornetContract);
     let client = AnchornetContractClient::new(env, &contract_id);
@@ -1172,7 +1210,7 @@ fn test_list_settlements_by_asset_empty_for_unknown() {
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_filters_other() {
+fn test_list_settlements_anchor_asset_filters_other() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
@@ -1193,44 +1231,412 @@ fn test_list_settlements_by_anchor_and_asset_filters_other() {
     let s3 = client.open_settlement(&a2, &usdc, &100);
     let s4 = client.open_settlement(&a1, &usdc, &100);
 
-    let a1_usdc = client.list_settlements_by_anchor_and_asset(&a1, &usdc, &1, &10);
+    let a1_usdc = client.list_settlements_anchor_asset(&a1, &usdc, &1, &10);
     assert_eq!(a1_usdc.len(), 2);
     assert_eq!(a1_usdc.get(0).unwrap().id, s1);
     assert_eq!(a1_usdc.get(1).unwrap().id, s4);
 
-    let a1_eurc = client.list_settlements_by_anchor_and_asset(&a1, &eurc, &1, &10);
+    let a1_eurc = client.list_settlements_anchor_asset(&a1, &eurc, &1, &10);
     assert_eq!(a1_eurc.len(), 1);
     assert_eq!(a1_eurc.get(0).unwrap().id, s2);
 
-    let a2_usdc = client.list_settlements_by_anchor_and_asset(&a2, &usdc, &1, &10);
+    let a2_usdc = client.list_settlements_anchor_asset(&a2, &usdc, &1, &10);
     assert_eq!(a2_usdc.len(), 1);
     assert_eq!(a2_usdc.get(0).unwrap().id, s3);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_respects_limit() {
+fn test_list_settlements_anchor_asset_respects_limit() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     for _ in 0..3 {
         client.open_settlement(&anchor, &asset, &100);
     }
 
-    let limited = client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &2);
+    let limited = client.list_settlements_anchor_asset(&anchor, &asset, &1, &2);
     assert_eq!(limited.len(), 2);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_empty_for_unknown() {
+fn test_list_settlements_anchor_asset_empty_for_unknown() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10).len(), 0);
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_anchor_asset(&stranger, &asset, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_asset(&anchor, &other_asset, &1, &10)
+            .len(),
+        0
+    );
 }
 
+/// Builds a fixture spanning three anchors and all four lifecycle states so
+/// the compound anchor+status filter has to reject on each field independently.
+///
+/// Layout (ids are sequential from 1):
+///
+/// | id | anchor | status    |
+/// |----|--------|-----------|
+/// | 1  | a1     | Pending   |
+/// | 2  | a2     | Pending   |
+/// | 3  | a1     | Executed  |
+/// | 4  | a1     | Pending   |
+/// | 5  | a2     | Cancelled |
+/// | 6  | a1     | Cancelled |
+/// | 7  | a2     | Executed  |
+/// | 8  | a1     | Expired   |
+/// | 9  | a2     | Pending   |
+///
+/// `a3` is registered and funded but opens nothing, covering the
+/// "known anchor, no settlements" case.
+fn mixed_anchor_status_fixture(
+    env: &Env,
+) -> (
+    AnchornetContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    Symbol,
+) {
+    env.mock_all_auths();
+    let (client, admin) = setup(env);
+    let a1 = Address::generate(env);
+    let a2 = Address::generate(env);
+    let a3 = Address::generate(env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.register_anchor(&a3);
+    client.provide_liquidity(&a1, &asset, &10_000);
+    client.provide_liquidity(&a2, &asset, &10_000);
+    client.provide_liquidity(&a3, &asset, &10_000);
+
+    // Short expiry window so id 8 can be driven into the Expired state.
+    client.set_settlement_expiry_ledgers(&10);
+
+    client.open_settlement(&a1, &asset, &100); // 1 -> a1 Pending
+    client.open_settlement(&a2, &asset, &100); // 2 -> a2 Pending
+    let executed_a1 = client.open_settlement(&a1, &asset, &100); // 3
+    client.open_settlement(&a1, &asset, &100); // 4 -> a1 Pending
+    let cancelled_a2 = client.open_settlement(&a2, &asset, &100); // 5
+    let cancelled_a1 = client.open_settlement(&a1, &asset, &100); // 6
+    let executed_a2 = client.open_settlement(&a2, &asset, &100); // 7
+    let expired_a1 = client.open_settlement(&a1, &asset, &100); // 8
+
+    client.execute_settlement(&executed_a1);
+    client.execute_settlement(&executed_a2);
+    client.cancel_settlement(&cancelled_a1);
+    client.cancel_settlement(&cancelled_a2);
+
+    // Advance past the expiry window and reclaim id 8, then open id 9 so a
+    // Pending settlement also exists *after* the expired one.
+    env.ledger().set_sequence_number(50);
+    client.cancel_expired_settlement(&expired_a1);
+    client.open_settlement(&a2, &asset, &100); // 9 -> a2 Pending
+
+    (client, a1, a2, a3, asset)
+}
+
+/// Collects the ids of a settlement page into a plain `Vec<u64>` for concise
+/// order-sensitive assertions.
+fn ids_of(page: soroban_sdk::Vec<crate::Settlement>) -> std::vec::Vec<u64> {
+    page.iter().map(|s| s.id).collect()
+}
+
+#[test]
+fn test_list_settlements_anchor_status_filters_both_fields() {
+    let env = Env::default();
+    let (client, a1, a2, _a3, _asset) = mixed_anchor_status_fixture(&env);
+
+    // Only a1's Pending settlements — excludes a2's Pending (2, 9) and a1's
+    // own non-Pending records (3, 6, 8).
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &1, &10)),
+        std::vec![1, 4]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a2, &SettlementStatus::Pending, &1, &10)),
+        std::vec![2, 9]
+    );
+
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Executed, &1, &10)),
+        std::vec![3]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a2, &SettlementStatus::Executed, &1, &10)),
+        std::vec![7]
+    );
+
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Cancelled, &1, &10)),
+        std::vec![6]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a2, &SettlementStatus::Cancelled, &1, &10)),
+        std::vec![5]
+    );
+
+    // Only a1 ever had a settlement expire.
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Expired, &1, &10)),
+        std::vec![8]
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&a2, &SettlementStatus::Expired, &1, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_returns_full_struct() {
+    let env = Env::default();
+    let (client, a1, _a2, _a3, asset) = mixed_anchor_status_fixture(&env);
+
+    let page = client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &1, &10);
+    assert_eq!(page.len(), 2);
+    for settlement in page.iter() {
+        // Every returned record must satisfy *both* predicates.
+        assert_eq!(settlement.anchor, a1);
+        assert_eq!(settlement.status, SettlementStatus::Pending);
+        assert_eq!(settlement.asset, asset);
+        assert_eq!(settlement.amount, 100);
+    }
+}
+
+#[test]
+fn test_list_settlements_anchor_status_agrees_with_single_filters() {
+    let env = Env::default();
+    let (client, a1, a2, _a3, _asset) = mixed_anchor_status_fixture(&env);
+
+    // The compound filter must equal the intersection of the two single-field
+    // filters, which is exactly the client-side work it replaces.
+    for anchor in [&a1, &a2] {
+        for status in [
+            SettlementStatus::Pending,
+            SettlementStatus::Executed,
+            SettlementStatus::Cancelled,
+            SettlementStatus::Expired,
+        ] {
+            let expected: std::vec::Vec<u64> = client
+                .list_settlements_by_anchor(anchor, &1, &1_000)
+                .iter()
+                .filter(|s| s.status == status)
+                .map(|s| s.id)
+                .collect();
+
+            assert_eq!(
+                ids_of(client.list_settlements_anchor_status(anchor, &status, &1, &1_000)),
+                expected,
+                "compound filter drifted from anchor+status intersection for {:?}",
+                status
+            );
+        }
+    }
+}
+
+#[test]
+fn test_list_settlements_anchor_status_skips_without_counting_non_matches() {
+    let env = Env::default();
+    let (client, a1, _a2, _a3, _asset) = mixed_anchor_status_fixture(&env);
+
+    // a1's Pending ids are 1 and 4. A limit of 1 must return only id 1, and a
+    // limit of 2 must reach id 4 — proving ids 2 and 3 were skipped without
+    // consuming budget, matching the rest of the list_settlements_by_* family.
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &1, &1)),
+        std::vec![1]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &1, &2)),
+        std::vec![1, 4]
+    );
+
+    // a1's single Expired record sits at id 8, behind seven non-matching ids;
+    // a limit of 1 still reaches it.
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Expired, &1, &1)),
+        std::vec![8]
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_paginates_from_start() {
+    let env = Env::default();
+    let (client, a1, a2, _a3, _asset) = mixed_anchor_status_fixture(&env);
+
+    // start is an id cursor, not a match index: beginning after id 1 drops it.
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &2, &10)),
+        std::vec![4]
+    );
+    assert!(ids_of(client.list_settlements_anchor_status(
+        &a1,
+        &SettlementStatus::Pending,
+        &5,
+        &10
+    ))
+    .is_empty());
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a2, &SettlementStatus::Pending, &3, &10)),
+        std::vec![9]
+    );
+
+    // Walking the full result set one page at a time reassembles it exactly.
+    let mut collected = std::vec::Vec::new();
+    let mut cursor = 1u64;
+    loop {
+        let page =
+            client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &cursor, &1);
+        match page.get(0) {
+            Some(settlement) => {
+                collected.push(settlement.id);
+                cursor = settlement.id + 1;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(collected, std::vec![1, 4]);
+}
+
+#[test]
+fn test_list_settlements_anchor_status_start_zero_treated_as_one() {
+    let env = Env::default();
+    let (client, a1, _a2, _a3, _asset) = mixed_anchor_status_fixture(&env);
+
+    // Mirrors the rest of the family: a zero cursor is normalized to id 1
+    // rather than skipping the first settlement. Ids are assigned from 1, so
+    // this is observationally identical to starting the scan at 0 — asserted
+    // against concrete ids (not a self-comparison) so a regression that lost
+    // the first match would still be caught.
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &0, &10)),
+        std::vec![1, 4]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&a1, &SettlementStatus::Pending, &1, &10)),
+        std::vec![1, 4]
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_empty_for_unknown_inputs() {
+    let env = Env::default();
+    let (client, a1, _a2, a3, _asset) = mixed_anchor_status_fixture(&env);
+    let stranger = Address::generate(&env);
+
+    // Never-seen address, and a registered anchor that never opened anything.
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&stranger, &SettlementStatus::Pending, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&a3, &SettlementStatus::Pending, &1, &10)
+            .len(),
+        0
+    );
+    // Valid anchor, but a status it holds no settlements in.
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&a1, &SettlementStatus::Expired, &9, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_reflects_lifecycle_transitions() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    let id = client.open_settlement(&anchor, &asset, &100);
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &1, &10)),
+        std::vec![id]
+    );
+
+    // Executing must move the record between buckets, not duplicate it.
+    client.execute_settlement(&id);
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_anchor_status(
+            &anchor,
+            &SettlementStatus::Executed,
+            &1,
+            &10
+        )),
+        std::vec![id]
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_no_settlements_at_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+
+    // settlement_count is 0, so the scan loop must not execute at all.
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &0, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_leaves_single_filters_unchanged() {
+    let env = Env::default();
+    let (client, a1, a2, _a3, asset) = mixed_anchor_status_fixture(&env);
+
+    // Regression guard for the acceptance criterion that existing entrypoints
+    // keep their semantics: a1 owns 5 settlements, a2 owns 4, and the global
+    // status views still span every anchor.
+    assert_eq!(client.list_settlements_by_anchor(&a1, &1, &100).len(), 5);
+    assert_eq!(client.list_settlements_by_anchor(&a2, &1, &100).len(), 4);
+
+    assert_eq!(
+        ids_of(client.list_settlements_by_status(&SettlementStatus::Pending, &1, &100)),
+        std::vec![1, 2, 4, 9]
+    );
+    assert_eq!(
+        ids_of(client.list_settlements_by_status(&SettlementStatus::Executed, &1, &100)),
+        std::vec![3, 7]
+    );
+    assert_eq!(client.list_settlements_by_asset(&asset, &1, &100).len(), 9);
+    assert_eq!(
+        client
+            .list_settlements_anchor_asset(&a1, &asset, &1, &100)
+            .len(),
+        5
+    );
+}
 
 #[test]
 fn test_version() {
@@ -2331,17 +2737,39 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    assert_operator_rejected!(env, client, operator, "pause", (), client.try_pause(&operator));
-    assert_operator_rejected!(env, client, operator, "unpause", (), client.try_unpause(&operator));
-    assert_operator_rejected!(
+    // Once the operator role is cleared, the former operator is just another
+    // unprivileged address: `require_admin_or_operator` returns a contract-level
+    // NotAuthorized before any signature is demanded, so these are asserted with
+    // `assert_caller_unauthorized!` rather than the host-abort macro.
+    assert_caller_unauthorized!(
+        env,
+        client,
+        operator,
+        "pause",
+        (operator.clone(),),
+        client.try_pause(&operator)
+    );
+    assert_caller_unauthorized!(
+        env,
+        client,
+        operator,
+        "unpause",
+        (operator.clone(),),
+        client.try_unpause(&operator)
+    );
+    assert_caller_unauthorized!(
         env,
         client,
         operator,
         "extend_instance_ttl",
-        (),
+        (operator.clone(),),
         client.try_extend_instance_ttl(&operator)
     );
-    
+
+    // Restore permissive auth so the admin-can-still-act check below is not
+    // constrained by the narrow per-call mocks set above.
+    env.mock_all_auths();
+
     // Admin can still act
     client.pause(&admin);
     assert!(client.is_paused());
@@ -2888,11 +3316,7 @@ fn test_settlement_age_rejects_unknown_id() {
     let env = Env::default();
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
-    let err = client
-        .try_settlement_age(&99)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_settlement_age(&99).err().unwrap().unwrap();
     assert_eq!(err, Error::SettlementNotFound);
 }
 
@@ -4315,51 +4739,114 @@ fn test_list_settlements_by_asset_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.get(1).unwrap().id, id2);
 }
 
-// --- list_settlements_by_anchor_and_asset ---
+// --- list_settlements_anchor_asset ---
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_start_past_end_returns_empty() {
+fn test_list_settlements_anchor_asset_start_past_end_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10).len(),
+        client
+            .list_settlements_anchor_asset(&anchor, &asset, &3, &10)
+            .len(),
         0
     );
     assert_eq!(
         client
-            .list_settlements_by_anchor_and_asset(&anchor, &asset, &u64::MAX, &10)
+            .list_settlements_anchor_asset(&anchor, &asset, &u64::MAX, &10)
             .len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_limit_zero_returns_empty() {
+fn test_list_settlements_anchor_asset_limit_zero_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0).len(),
+        client
+            .list_settlements_anchor_asset(&anchor, &asset, &1, &0)
+            .len(),
         0
     );
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0).len(),
+        client
+            .list_settlements_anchor_asset(&anchor, &asset, &0, &0)
+            .len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_limit_exceeds_remaining_returns_all() {
+fn test_list_settlements_anchor_asset_limit_exceeds_remaining_returns_all() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     let id1 = client.open_settlement(&anchor, &asset, &100);
     let id2 = client.open_settlement(&anchor, &asset, &100);
 
-    let result = client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &1_000);
+    let result = client.list_settlements_anchor_asset(&anchor, &asset, &1, &1_000);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, id1);
+    assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+// --- list_settlements_anchor_status ---
+
+#[test]
+fn test_list_settlements_anchor_status_start_past_end_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &3, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &u64::MAX, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_limit_zero_returns_empty() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &1, &0)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &0, &0)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_anchor_status_limit_exceeds_remaining_returns_all() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    let id2 = client.open_settlement(&anchor, &asset, &100);
+
+    let result =
+        client.list_settlements_anchor_status(&anchor, &SettlementStatus::Pending, &1, &1_000);
     assert_eq!(result.len(), 2);
     assert_eq!(result.get(0).unwrap().id, id1);
     assert_eq!(result.get(1).unwrap().id, id2);
