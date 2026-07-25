@@ -520,6 +520,16 @@ impl AnchornetContract {
         storage::get_min_liquidity(&env, &asset)
     }
 
+    /// Returns `true` if `asset` has a configured minimum liquidity entry.
+    ///
+    /// This distinguishes a never-configured asset from one whose floor was
+    /// explicitly set to zero to intentionally disable the withdrawal check;
+    /// both cases continue to make [`min_liquidity`](Self::min_liquidity)
+    /// return `0`.
+    pub fn is_min_liquidity_configured(env: Env, asset: Symbol) -> bool {
+        storage::has_min_liquidity(&env, &asset)
+    }
+
     /// Sets the maximum amount a single [`open_settlement`](Self::open_settlement)
     /// call may reserve for `asset`. A call above this cap fails with
     /// [`Error::AboveMaxSettlementAmount`]. Zero (the default) disables the

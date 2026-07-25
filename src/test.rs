@@ -2591,8 +2591,49 @@ fn test_min_liquidity_disabled_by_default() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
     assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(!client.is_min_liquidity_configured(&asset));
 
     // With no floor configured, a full withdrawal is unaffected.
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    assert_eq!(client.total_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_is_min_liquidity_configured_false_before_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+
+    assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(!client.is_min_liquidity_configured(&asset));
+}
+
+#[test]
+fn test_is_min_liquidity_configured_true_after_nonzero_floor() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    client.set_min_liquidity(&asset, &200);
+
+    assert_eq!(client.min_liquidity(&asset), 200);
+    assert!(client.is_min_liquidity_configured(&asset));
+}
+
+#[test]
+fn test_is_min_liquidity_configured_true_after_explicit_zero_floor() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    client.set_min_liquidity(&asset, &0);
+
+    assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(client.is_min_liquidity_configured(&asset));
+
+    // Existing behavior is unchanged: an explicit zero floor still disables
+    // the withdrawal check, so a full withdrawal remains allowed.
     client.withdraw_liquidity(&anchor, &asset, &1_000);
     assert_eq!(client.total_liquidity(&asset), 0);
 }
