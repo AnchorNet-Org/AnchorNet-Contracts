@@ -3531,6 +3531,164 @@ fn test_settlement_count_by_status_counts_across_full_history() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: fully paginating `list_settlements_by_status` must partition the
+// settlement history exactly as `settlement_count_by_status` counts it
+// (issue #149).
+//
+// The two functions answer the same question by different means:
+// `settlement_count_by_status` scans every id unconditionally, while
+// `list_settlements_by_status` walks ids from `start` and stops as soon as
+// `limit` matches are collected. Any drift between them means one of the two
+// is wrong, and an off-chain dashboard paging by status would disagree with
+// the headline count it displays elsewhere.
+//
+// Per-status equality alone is weaker than it looks: it survives a bug that
+// double-counts some settlements and drops others in equal measure. The
+// invariant asserted here is a partition — the four per-status id sets are
+// pairwise disjoint and their union is exactly `1..=settlement_count()` —
+// which additionally catches an id served under two statuses and an
+// off-by-one in either walker.
+//
+// Pagination detail the loop below depends on: `start` is a cursor over
+// settlement *ids*, not an offset into the matches. Advancing by
+// `start += limit` is therefore wrong and silently re-serves entries whenever
+// a status does not begin at the cursor — Executed lands on ids {1, 2, 7, 8}
+// here, so that naive advance returns {7, 8} on two consecutive pages. The
+// loop advances to `last returned id + 1` instead, and terminates only on an
+// empty page, so a paginator that ends a page early is still caught. The
+// per-status duplicate assertion below is what pins this down; substituting
+// the naive advance makes it fire.
+//
+// The batch below is also the only coverage of a *non-empty* Expired set:
+// `test_list_settlements_by_status_filters_lifecycle_state` and
+// `test_settlement_count_by_status_counts_across_full_history` both assert
+// only that Expired comes back as 0.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_status_pagination_partitions_settlement_history() {
+    use std::collections::HashSet;
+
+    // Deliberately smaller than any per-status set, to force multi-page
+    // accumulation rather than a single page that happens to hold everything.
+    const PAGE: u32 = 2;
+
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 10_000);
+    client.set_settlement_expiry_ledgers(&10);
+
+    // First wave, opened at ledger 100 so it can be aged past the window.
+    env.ledger().set_sequence_number(100);
+    let a1 = client.open_settlement(&anchor, &asset, &100);
+    let a2 = client.open_settlement(&anchor, &asset, &100);
+    let a3 = client.open_settlement(&anchor, &asset, &100);
+    let a4 = client.open_settlement(&anchor, &asset, &100);
+    let a5 = client.open_settlement(&anchor, &asset, &100);
+    let a6 = client.open_settlement(&anchor, &asset, &100);
+
+    // Resolve part of the first wave while it is still inside the window;
+    // execute_settlement rejects a settlement that is already past expiry.
+    client.execute_settlement(&a1);
+    client.execute_settlement(&a2);
+    client.cancel_settlement(&a3);
+    client.cancel_settlement(&a4);
+
+    // Age past the window and reclaim the remainder. This is the only path
+    // that writes `SettlementStatus::Expired`.
+    env.ledger().set_sequence_number(120);
+    client.cancel_expired_settlement(&a5);
+    client.cancel_expired_settlement(&a6);
+
+    // Second wave, opened after the advance, so it is still inside its own
+    // window at the ledger the assertions run on and stays Pending.
+    let b1 = client.open_settlement(&anchor, &asset, &100);
+    let b2 = client.open_settlement(&anchor, &asset, &100);
+    let b3 = client.open_settlement(&anchor, &asset, &100);
+    let b4 = client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    client.execute_settlement(&b1);
+    client.execute_settlement(&b2);
+    client.cancel_settlement(&b3);
+    client.cancel_settlement(&b4);
+
+    // Interleaved on purpose: Executed at {a1, a2, b1, b2} = {1, 2, 7, 8} is
+    // exactly the non-contiguous shape that breaks a `start += limit` walker.
+    assert_eq!(client.settlement_count(), 12);
+
+    // Fully paginate one status, accumulating ids across pages.
+    let collect_ids = |status: SettlementStatus| -> HashSet<u64> {
+        let mut ids = HashSet::new();
+        let mut start = 1u64;
+        loop {
+            let page = client.list_settlements_by_status(&status, &start, &PAGE);
+            if page.is_empty() {
+                break;
+            }
+            assert!(
+                page.len() <= PAGE,
+                "a page returned more entries than the requested limit"
+            );
+            for settlement in page.iter() {
+                assert_eq!(
+                    settlement.status, status,
+                    "the status filter returned a settlement in another state"
+                );
+                assert!(
+                    ids.insert(settlement.id),
+                    "settlement {} was served twice within one status",
+                    settlement.id
+                );
+            }
+            // Advance by id, not by limit: `start` is an id cursor.
+            start = page.get(page.len() - 1).unwrap().id + 1;
+        }
+        ids
+    };
+
+    let pending = collect_ids(SettlementStatus::Pending);
+    let executed = collect_ids(SettlementStatus::Executed);
+    let cancelled = collect_ids(SettlementStatus::Cancelled);
+    let expired = collect_ids(SettlementStatus::Expired);
+
+    // Each accumulated set matches the unconditional scan, per status.
+    for (status, ids) in [
+        (SettlementStatus::Pending, &pending),
+        (SettlementStatus::Executed, &executed),
+        (SettlementStatus::Cancelled, &cancelled),
+        (SettlementStatus::Expired, &expired),
+    ] {
+        assert_eq!(
+            ids.len() as u64,
+            client.settlement_count_by_status(&status),
+            "paginated accumulation disagrees with settlement_count_by_status"
+        );
+        // A partition of empty sets would satisfy the checks below vacuously.
+        assert!(!ids.is_empty(), "the batch must exercise every status");
+    }
+
+    // The four sets are pairwise disjoint.
+    let sets = [&pending, &executed, &cancelled, &expired];
+    for (i, left) in sets.iter().enumerate() {
+        for right in sets.iter().skip(i + 1) {
+            assert!(
+                left.intersection(right).next().is_none(),
+                "a settlement id was served under two different statuses"
+            );
+        }
+    }
+
+    // Their union is every id ever assigned — no gaps, no strays.
+    let union: HashSet<u64> = sets.iter().flat_map(|set| set.iter().copied()).collect();
+    let every_id: HashSet<u64> = (1..=client.settlement_count()).collect();
+    assert_eq!(
+        union, every_id,
+        "the per-status sets must cover exactly 1..=settlement_count()"
+    );
+}
+
 #[test]
 fn test_settlement_count_by_status_is_zero_with_no_settlements() {
     let env = Env::default();
