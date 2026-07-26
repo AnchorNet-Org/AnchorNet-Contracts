@@ -546,14 +546,22 @@ impl AnchornetContract {
         storage::get_min_liquidity(&env, &asset)
     }
 
-    /// Returns `true` if `asset` has a configured minimum liquidity entry.
-    ///
-    /// This distinguishes a never-configured asset from one whose floor was
-    /// explicitly set to zero to intentionally disable the withdrawal check;
-    /// both cases continue to make [`min_liquidity`](Self::min_liquidity)
-    /// return `0`.
-    pub fn is_min_liquidity_configured(env: Env, asset: Symbol) -> bool {
-        storage::has_min_liquidity(&env, &asset)
+    /// Clears the minimum liquidity floor for `asset`, reverting to unset state.
+    /// Admin only.
+    pub fn clear_min_liquidity(env: Env, asset: Symbol) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_min_liquidity(&env, &asset);
+        events::min_liquidity_changed(&env, &asset, 0);
+        Ok(())
+    }
+
+    /// Clears the maximum settlement amount for `asset`, reverting to unset state.
+    /// Admin only.
+    pub fn clear_max_settlement_amount(env: Env, asset: Symbol) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        storage::clear_max_settlement_amount(&env, &asset);
+        events::max_settlement_amount_changed(&env, &asset, 0);
+        Ok(())
     }
 
     /// Sets the maximum amount a single [`open_settlement`](Self::open_settlement)
@@ -1213,23 +1221,28 @@ impl AnchornetContract {
         out
     }
 
-    /// Returns the lowest id (which is also the oldest by `opened_at`, as ids
-    /// are assigned sequentially) among currently `Pending` settlements for
-    /// `asset`. Returns `None` if no pending settlement exists for the asset.
-    /// This is intended for off-chain keepers to find the oldest settlement
-    /// to check for expiration via `cancel_expired_settlement`.
-    pub fn oldest_pending_settlement_id(env: Env, asset: Symbol) -> Option<u64> {
+    /// Returns settlements opened at or after the given ledger sequence.
+    /// Scans settlement IDs starting at `start` (inclusive) and returns up to `limit`
+    /// settlements whose `opened_at` >= `ledger`. IDs are assigned sequentially;
+    /// missing or non‑matching IDs are skipped without counting toward `limit`.
+    pub fn list_settlements_opened_since(
+        env: Env,
+        ledger: u32,
+        start: u64,
+        limit: u32,
+    ) -> Vec<Settlement> {
+        let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
-        let mut id = 1;
-        while id <= count {
+        let mut id = if start == 0 { 1 } else { start };
+        while id <= count && (out.len() as u32) < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
-                if settlement.asset == asset && settlement.status == SettlementStatus::Pending {
-                    return Some(id);
+                if settlement.opened_at >= ledger {
+                    out.push_back(settlement);
                 }
             }
             id += 1;
         }
-        None
+        out
     }
 
     /// Returns the accrued (uncollected) protocol fees for `asset`.

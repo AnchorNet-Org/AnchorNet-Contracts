@@ -3347,9 +3347,25 @@ fn test_operator_is_rejected_by_every_strictly_admin_only_entrypoint() {
         env,
         client,
         operator,
+        "clear_min_liquidity",
+        (asset.clone(),),
+        client.try_clear_min_liquidity(&asset)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
         "set_max_settlement_amount",
         (asset.clone(), 500_i128),
         client.try_set_max_settlement_amount(&asset, &500)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "clear_max_settlement_amount",
+        (asset.clone(),),
+        client.try_clear_max_settlement_amount(&asset)
     );
     assert_operator_rejected!(
         env,
@@ -3441,6 +3457,37 @@ fn test_set_min_liquidity_updates_value() {
     client.set_min_liquidity(&asset, &200);
 
     assert_eq!(client.min_liquidity(&asset), 200);
+}
+
+#[test]
+fn test_clear_min_liquidity() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    client.set_min_liquidity(&asset, &200);
+    assert_eq!(client.min_liquidity(&asset), 200);
+
+    let key = DataKey::MinLiquidity(asset.clone());
+    let has_key_before = env.as_contract(&client.address, || env.storage().persistent().has(&key));
+    assert!(has_key_before);
+
+    client.clear_min_liquidity(&asset);
+
+    assert_eq!(client.min_liquidity(&asset), 0);
+
+    let has_key_after = env.as_contract(&client.address, || env.storage().persistent().has(&key));
+    assert!(!has_key_after);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event,
+        (
+            client.address.clone(),
+            (symbol_short!("minliq"), asset.clone()).into_val(&env),
+            0_i128.into_val(&env),
+        )
+    );
 }
 
 #[test]
@@ -3992,6 +4039,37 @@ fn test_set_max_settlement_amount_updates_value() {
 
     assert_eq!(client.max_settlement_amount(&asset), 500);
     assert!(client.is_max_settlement_amount_configured(&asset));
+}
+
+#[test]
+fn test_clear_max_settlement_amount() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    client.set_max_settlement_amount(&asset, &500);
+    assert_eq!(client.max_settlement_amount(&asset), 500);
+
+    let key = DataKey::MaxSettlementAmount(asset.clone());
+    let has_key_before = env.as_contract(&client.address, || env.storage().persistent().has(&key));
+    assert!(has_key_before);
+
+    client.clear_max_settlement_amount(&asset);
+
+    assert_eq!(client.max_settlement_amount(&asset), 0);
+
+    let has_key_after = env.as_contract(&client.address, || env.storage().persistent().has(&key));
+    assert!(!has_key_after);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event,
+        (
+            client.address.clone(),
+            (symbol_short!("maxamt"), asset.clone()).into_val(&env),
+            0_i128.into_val(&env),
+        )
+    );
 }
 
 #[test]
