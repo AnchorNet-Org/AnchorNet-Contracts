@@ -1098,7 +1098,11 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
-    pub fn list_settlements_by_anchor_asset(
+    ///
+    /// Named without the `by_` infix because Soroban caps exported contract
+    /// function names at 32 characters (`SCSYMBOL_LIMIT`); the fully spelled
+    /// `list_settlements_by_anchor_and_asset` is 36 and fails to compile.
+    pub fn list_settlements_anchor_asset(
         env: Env,
         anchor: Address,
         asset: Symbol,
@@ -1111,6 +1115,46 @@ impl AnchornetContract {
         while id <= count && (out.len() as u32) < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.anchor == anchor && settlement.asset == asset {
+                    out.push_back(settlement);
+                }
+            }
+            id += 1;
+        }
+        out
+    }
+
+    /// Returns up to `limit` settlements matching both `anchor` and `status`,
+    /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
+    /// missing or non-matching ids are skipped without counting toward `limit`.
+    ///
+    /// Answers "which of my settlements are still
+    /// [`Pending`](SettlementStatus::Pending)?" in a single call. Combining
+    /// both filters on-chain spares callers a client-side filtering step whose
+    /// cost scales with the anchor's entire settlement history rather than just
+    /// the matching subset — useful for an anchor checking its outstanding
+    /// exposure before opening a new settlement near a risk limit.
+    ///
+    /// Named without the `by_` infix because Soroban caps exported contract
+    /// function names at 32 characters (`SCSYMBOL_LIMIT`); the fully spelled
+    /// `list_settlements_by_anchor_and_status` is 37 and fails to compile.
+    ///
+    /// Mirrors the pagination semantics of
+    /// [`list_settlements_by_anchor`](Self::list_settlements_by_anchor) and
+    /// [`list_settlements_by_status`](Self::list_settlements_by_status),
+    /// filtering on both fields in one scan instead of either alone.
+    pub fn list_settlements_anchor_status(
+        env: Env,
+        anchor: Address,
+        status: SettlementStatus,
+        start: u64,
+        limit: u32,
+    ) -> Vec<Settlement> {
+        let mut out = Vec::new(&env);
+        let count = storage::get_settlement_count(&env);
+        let mut id = if start == 0 { 1 } else { start };
+        while id <= count && (out.len() as u32) < limit {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.anchor == anchor && settlement.status == status {
                     out.push_back(settlement);
                 }
             }
