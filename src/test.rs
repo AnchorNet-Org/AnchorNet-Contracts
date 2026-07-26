@@ -747,6 +747,67 @@ fn test_small_settlement_executes_without_accruing_truncated_fee() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
+    /// Fuzzes the three-axis fee-configuration interaction space: a global fee
+    /// (`set_fee`), an optional per-asset override (`set_asset_fee` / clear),
+    /// and an optional per-anchor waiver (`set_fee_waiver`). Precedence is:
+    /// waiver > asset override > global rate. Every generated combination is
+    /// cross-checked against `quote_fee` and the settlement's own `fee` and
+    /// the accrued fee after `execute_settlement`.
+    #[test]
+    fn prop_fee_three_axis_interaction(
+        amount in fee_amount_strategy(),
+        global_bps in 0u32..=1_000,
+        override_bps in prop::option::of(0u32..=1_000),
+        waived in prop::bool::ANY,
+    ) {
+        let env = fee_test_env();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let anchor = Address::generate(&env);
+        let asset = symbol_short!("USDC");
+        client.initialize(&admin);
+        client.register_anchor(&anchor);
+        client.provide_liquidity(&anchor, &asset, &amount);
+        client.set_fee(&global_bps);
+        if let Some(bps) = override_bps {
+            client.set_asset_fee(&asset, &bps);
+        } else {
+            client.clear_asset_fee(&asset);
+        }
+        if waived {
+            client.set_fee_waiver(&anchor, &true);
+        } else {
+            client.set_fee_waiver(&anchor, &false);
+        }
+
+        let expected_bps = if waived {
+            0
+        } else if override_bps.is_some() {
+            override_bps.unwrap()
+        } else {
+            global_bps
+        };
+        let expected_fee = if amount > 0 {
+            client.quote_fee(&asset, &amount).unwrap_or(0)
+        } else {
+            0
+        };
+        let id = client.open_settlement(&anchor, &asset, &amount);
+        let settlement_fee = client.settlement(&id).fee;
+        if waived {
+            prop_assert_eq!(settlement_fee, 0);
+            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            client.execute_settlement(&id);
+            prop_assert_eq!(client.fees_accrued(&asset), 0);
+        } else {
+            prop_assert_eq!(settlement_fee, expected_fee);
+            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            let before = client.fees_accrued(&asset);
+            client.execute_settlement(&id);
+            prop_assert_eq!(client.fees_accrued(&asset) - before, expected_fee);
+        }
+    }
+
     #[test]
     fn prop_quote_fee_is_monotonic_and_bounded_with_global_fee(
         first in fee_amount_strategy(),
