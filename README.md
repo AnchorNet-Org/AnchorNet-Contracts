@@ -66,35 +66,6 @@ set_min_liquidity(asset, floor)	admin	Set the minimum liquidity floor an asset's
 min_liquidity(asset)	–	Read the minimum liquidity floor configured for an asset
 set_max_settlement_amount(asset, amount)	admin	Cap the amount a single settlement may reserve for an asset (0 disables)
 max_settlement_amount(asset)	–	Read the maximum settlement amount configured for an asset
-⚠️ Storage note — append-only anchor & asset lists
-
-The backing stores for register_anchor / register_anchors /
-list_anchors / anchor_count (the AnchorList persistent entry in
-src/storage.rs) and list_assets / asset_count (the AssetList
-entry) are append-only. Every new anchor or asset is appended to a
-single monolithic Vec that is rewritten in its entirety on each
-registration. deregister_anchor flips the per-address boolean but does
-not remove the address from AnchorList; likewise, an asset is never
-removed from AssetList even if all liquidity is withdrawn.
-
-Practical ceiling. Because each append reads, scans for duplicates,
-and rewrites the whole list, the cost of a single register_anchor or
-register_anchors call grows linearly with the accumulated list size.
-Until the storage refactor lands, plan to stay below roughly 500
-total accumulated anchors and ~200 distinct assets to remain
-comfortably within Soroban's per-transaction instruction budget
-(~100 million instructions for a classic transaction). Batch
-register_anchors calls with very large input vectors on an already
-large list are the most likely to hit the budget ceiling first.
-
-Tracking. A refactor that replaces the monolithic Vec with a
-per-entry keyed layout (removing the O(n) rewrite on every append and
-enabling compaction of deregistered anchors) is tracked in
-AnchorNet-Org/AnchorNet-Contracts#124.
-The cost model described above is expected to change once that issue is
-resolved; check it for current status before planning large-scale
-anchor or asset onboarding.
-
 Admin & lifecycle
 Function	Auth	Description
 pause(caller) / unpause(caller)	admin or operator	Halt or resume liquidity & settlement mutations
@@ -151,6 +122,8 @@ cancel_expired_settlement requires no authorization: it only ever returns
 liquidity to the shared pool it was reserved from, never to an external
 party, so anyone (including an off-chain keeper) may call it once a pending
 settlement has passed the configured expiry window.
+
+Keeper Workflow: Off-chain keepers are expected to call oldest_pending_settlement_id(asset) to discover the oldest pending settlement for an asset, and then call cancel_expired_settlement(id) if it has expired. This minimizes wasteful calls to not-yet-expired ids.
 
 pause and unpause take an explicit caller argument (Soroban contracts
 have no implicit sender) that must be either the admin or the appointed

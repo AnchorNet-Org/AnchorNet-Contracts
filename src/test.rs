@@ -1347,6 +1347,69 @@ fn test_list_settlements_by_anchor_empty_for_unknown() {
 }
 
 #[test]
+fn test_oldest_pending_settlement_id_returns_none_when_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let usdc = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    
+    assert_eq!(client.oldest_pending_settlement_id(&usdc), None);
+}
+
+#[test]
+fn test_oldest_pending_settlement_id_returns_only_one_when_one_exists() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+
+    let id = client.open_settlement(&anchor, &usdc, &100);
+
+    assert_eq!(client.oldest_pending_settlement_id(&usdc), Some(id));
+}
+
+#[test]
+fn test_oldest_pending_settlement_id_skips_other_assets_and_statuses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+
+    // eurc pending -> should be ignored because different asset
+    let _s1 = client.open_settlement(&anchor, &eurc, &100);
+    
+    // usdc pending -> we'll execute it to change status
+    let s2 = client.open_settlement(&anchor, &usdc, &100);
+    client.execute_settlement(&s2);
+
+    // usdc pending -> we'll cancel it to change status
+    let s3 = client.open_settlement(&anchor, &usdc, &100);
+    client.cancel_settlement(&s3);
+
+    // usdc pending -> this is the first actual match!
+    let s4 = client.open_settlement(&anchor, &usdc, &100);
+
+    // another usdc pending -> shouldn't be returned since s4 is older
+    let _s5 = client.open_settlement(&anchor, &usdc, &100);
+
+    assert_eq!(client.oldest_pending_settlement_id(&usdc), Some(s4));
+}
+
+#[test]
 fn test_list_settlements_by_asset_filters_other_assets() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1397,7 +1460,7 @@ fn test_list_settlements_by_asset_empty_for_unknown() {
 }
 
 #[test]
-fn test_list_settlements_by_anchor_asset_filters_other() {
+fn test_list_settlements_by_anch_asset_filters_other() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
@@ -1418,52 +1481,42 @@ fn test_list_settlements_by_anchor_asset_filters_other() {
     let s3 = client.open_settlement(&a2, &usdc, &100);
     let s4 = client.open_settlement(&a1, &usdc, &100);
 
-    let a1_usdc = client.list_settlements_by_anchor_asset(&a1, &usdc, &1, &10);
+    let a1_usdc = client.list_settlements_by_anch_asset(&a1, &usdc, &1, &10);
     assert_eq!(a1_usdc.len(), 2);
     assert_eq!(a1_usdc.get(0).unwrap().id, s1);
     assert_eq!(a1_usdc.get(1).unwrap().id, s4);
 
-    let a1_eurc = client.list_settlements_by_anchor_asset(&a1, &eurc, &1, &10);
+    let a1_eurc = client.list_settlements_by_anch_asset(&a1, &eurc, &1, &10);
     assert_eq!(a1_eurc.len(), 1);
     assert_eq!(a1_eurc.get(0).unwrap().id, s2);
 
-    let a2_usdc = client.list_settlements_by_anchor_asset(&a2, &usdc, &1, &10);
+    let a2_usdc = client.list_settlements_by_anch_asset(&a2, &usdc, &1, &10);
     assert_eq!(a2_usdc.len(), 1);
     assert_eq!(a2_usdc.get(0).unwrap().id, s3);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_asset_respects_limit() {
+fn test_list_settlements_by_anch_asset_respects_limit() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     for _ in 0..3 {
         client.open_settlement(&anchor, &asset, &100);
     }
 
-    let limited = client.list_settlements_by_anchor_asset(&anchor, &asset, &1, &2);
+    let limited = client.list_settlements_by_anch_asset(&anchor, &asset, &1, &2);
     assert_eq!(limited.len(), 2);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_asset_empty_for_unknown() {
+fn test_list_settlements_by_anch_asset_empty_for_unknown() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(
-        client
-            .list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10)
-            .len(),
-        0
-    );
-    assert_eq!(
-        client
-            .list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10)
-            .len(),
-        0
-    );
+    assert_eq!(client.list_settlements_by_anch_asset(&stranger, &asset, &1, &10).len(), 0);
+    assert_eq!(client.list_settlements_by_anch_asset(&anchor, &other_asset, &1, &10).len(), 0);
 }
 
 #[test]
@@ -5541,57 +5594,51 @@ fn test_list_settlements_by_asset_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.get(1).unwrap().id, id2);
 }
 
-// --- list_settlements_by_anchor_asset ---
+// --- list_settlements_by_anch_asset ---
 
 #[test]
-fn test_list_settlements_by_anchor_asset_start_past_end_returns_empty() {
+fn test_list_settlements_by_anch_asset_start_past_end_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client
-            .list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10)
-            .len(),
+        client.list_settlements_by_anch_asset(&anchor, &asset, &3, &10).len(),
         0
     );
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&anchor, &asset, &u64::MAX, &10)
+            .list_settlements_by_anch_asset(&anchor, &asset, &u64::MAX, &10)
             .len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_asset_limit_zero_returns_empty() {
+fn test_list_settlements_by_anch_asset_limit_zero_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client
-            .list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0)
-            .len(),
+        client.list_settlements_by_anch_asset(&anchor, &asset, &1, &0).len(),
         0
     );
     assert_eq!(
-        client
-            .list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0)
-            .len(),
+        client.list_settlements_by_anch_asset(&anchor, &asset, &0, &0).len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_asset_limit_exceeds_remaining_returns_all() {
+fn test_list_settlements_by_anch_asset_limit_exceeds_remaining_returns_all() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     let id1 = client.open_settlement(&anchor, &asset, &100);
     let id2 = client.open_settlement(&anchor, &asset, &100);
 
-    let result = client.list_settlements_by_anchor_asset(&anchor, &asset, &1, &1_000);
+    let result = client.list_settlements_by_anch_asset(&anchor, &asset, &1, &1_000);
     assert_eq!(result.len(), 2);
     assert_eq!(result.get(0).unwrap().id, id1);
     assert_eq!(result.get(1).unwrap().id, id2);
