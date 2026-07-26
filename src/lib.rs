@@ -209,6 +209,7 @@ impl AnchornetContract {
     pub fn extend_instance_ttl(env: Env, caller: Address) -> Result<(), Error> {
         Self::require_admin_or_operator(&env, &caller)?;
         storage::extend_instance_ttl(&env);
+        events::instance_ttl_extended(&env);
         Ok(())
     }
 
@@ -1098,11 +1099,7 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
-    ///
-    /// Named without the `by_` infix because Soroban caps exported contract
-    /// function names at 32 characters (`SCSYMBOL_LIMIT`); the fully spelled
-    /// `list_settlements_by_anchor_and_asset` is 36 and fails to compile.
-    pub fn list_settlements_anchor_asset(
+    pub fn list_settlements_by_anchor_asset(
         env: Env,
         anchor: Address,
         asset: Symbol,
