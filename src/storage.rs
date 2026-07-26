@@ -376,6 +376,14 @@ pub fn set_fee_waiver(env: &Env, anchor: &Address, waived: bool) {
     extend(env, &key);
 }
 
+/// Returns `true` if the settlement expiry window has been explicitly
+/// configured, including an explicit zero value that disables expiry.
+pub fn has_settlement_expiry_ledgers(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .has(&DataKey::SettlementExpiryLedgers)
+}
+
 /// Reads the settlement expiry window in ledgers (zero if never configured,
 /// meaning settlements never expire).
 pub fn get_settlement_expiry_ledgers(env: &Env) -> u32 {
@@ -408,6 +416,15 @@ pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
+/// Returns `true` if a minimum liquidity floor has ever been configured for
+/// `asset`, including an explicit zero floor that intentionally disables the
+/// withdrawal check.
+pub fn has_min_liquidity(env: &Env, asset: &Symbol) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::MinLiquidity(asset.clone()))
+}
+
 /// Persists the minimum liquidity floor for `asset`.
 pub fn set_min_liquidity(env: &Env, asset: &Symbol, floor: i128) {
     let key = DataKey::MinLiquidity(asset.clone());
@@ -429,12 +446,42 @@ pub fn get_max_settlement_amount(env: &Env, asset: &Symbol) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
+/// Returns `true` if the maximum settlement amount for `asset` has ever been
+/// explicitly configured, including when it was configured to zero to disable
+/// the cap.
+///
+/// This distinguishes the default "never configured" zero returned by
+/// [`get_max_settlement_amount`] from an administrator's explicit
+/// `set_max_settlement_amount(asset, 0)` action. When present, the entry's TTL
+/// is extended just like the value getter so read-only audit checks keep the
+/// risk-parameter record alive.
+pub fn has_max_settlement_amount(env: &Env, asset: &Symbol) -> bool {
+    let key = DataKey::MaxSettlementAmount(asset.clone());
+    let configured = env.storage().persistent().has(&key);
+    if configured {
+        extend(env, &key);
+    }
+    configured
+}
+
 /// Persists the maximum settlement amount for `asset`.
 pub fn set_max_settlement_amount(env: &Env, asset: &Symbol, amount: i128) {
     let key = DataKey::MaxSettlementAmount(asset.clone());
     env.storage().persistent().set(&key, &amount);
     extend(env, &key);
 }
+
+    /// Removes the minimum liquidity floor for `asset`, reverting to unset state.
+    pub fn clear_min_liquidity(env: &Env, asset: &Symbol) {
+        let key = DataKey::MinLiquidity(asset.clone());
+        env.storage().persistent().remove(&key);
+    }
+
+    /// Removes the maximum settlement amount for `asset`, reverting to unset state.
+    pub fn clear_max_settlement_amount(env: &Env, asset: &Symbol) {
+        let key = DataKey::MaxSettlementAmount(asset.clone());
+        env.storage().persistent().remove(&key);
+    }
 
 /// Reads the per-asset fee override for `asset`, if one has been configured.
 ///

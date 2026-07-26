@@ -1,20 +1,15 @@
-# anchornet-contracts
+anchornet-contracts
+Soroban smart contracts for AnchorNet — the liquidity coordination network for Stellar anchors. This repo contains on-chain logic for liquidity pools, routing metadata, and settlement hooks.
 
-Soroban smart contracts for **AnchorNet** — the liquidity coordination network for Stellar anchors. This repo contains on-chain logic for liquidity pools, routing metadata, and settlement hooks.
+Overview
+Stack: Rust, Soroban SDK
+Network: Stellar (Soroban)
+Prerequisites
+Rust (stable, with rustfmt)
+Optional: Soroban CLI for deployment and local testing
+Setup
+Bash
 
-## Overview
-
-- **Stack:** Rust, [Soroban SDK](https://soroban.stellar.org/docs)
-- **Network:** Stellar (Soroban)
-
-## Prerequisites
-
-- [Rust](https://rustup.rs/) (stable, with `rustfmt`)
-- Optional: [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup#install-the-soroban-cli) for deployment and local testing
-
-## Setup
-
-```bash
 # Clone the repo (or use your fork)
 git clone <repo-url>
 cd anchornet-contracts
@@ -109,62 +104,96 @@ state.
 | `version()` | – | Read the contract interface version |
 
 Fee calculations intentionally use floor division:
-`floor(amount * bps / 10_000)`. As a result, tiny settlements can have a
+floor(amount * bps / 10_000). As a result, tiny settlements can have a
 zero fee even when the configured rate is nonzero. For example, at 1 bps,
 amounts below 10,000 quote and accrue a fee of 0, while an amount of 10,000
 produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
 
-### Settlement
+Settlement
+Function	Auth	Description
+open_settlement(anchor, asset, amount)	anchor	Reserve pool liquidity, returns a settlement id
+execute_settlement(id)	admin	Finalize a settlement and accrue its fee
+cancel_settlement(id)	anchor	Cancel and return reserved liquidity to the pool
+cancel_expired_settlement(id)	–	Reclaim a timed-out pending settlement's liquidity to the pool
+set_settlement_expiry_ledgers(ledgers)	admin	Set the ledger window after which a pending settlement may be reclaimed (0 disables)
+settlement_expiry_ledgers()	–	Read the settlement expiry window in ledgers
+settlement_exists(id)	–	Check whether a settlement exists
+is_settlement_pending(id)	–	Check whether a settlement exists and its status is Pending
+is_settlement_expired(id)	–	Check whether a pending settlement has passed the expiry window, without reclaiming it
+settlement(id)	–	Read a settlement record
+settlement_count()	–	Read the number of settlements
+list_settlements(start, limit)	–	Page through settlements
+list_settlements_by_anchor(anchor, start, limit)	–	Page through settlements opened by one anchor
+list_settlements_by_asset(asset, start, limit)	–	Page through settlements in one asset
+list_settlements_by_anchor_and_asset(anchor, asset, start, limit)	–	Page through settlements matching both anchor and asset
+list_settlements_by_status(status, start, limit)	–	Page through settlements in a given lifecycle state
+settlement_count_by_status(status)	–	Count every settlement in a given lifecycle state (no pagination)
+total_settled_amount(status)	–	Sum settled amount across every settlement in a given lifecycle state
+contract_info()	–	One-call snapshot of version, paused flag, fee, and anchor/asset/settlement counts
+Settlement lifecycle (state machine)
+SettlementStatus has four variants: Pending, Executed, Cancelled, Expired. Only the three one-way transitions shown below are valid. All three destination states are terminal — no further transition is possible from Executed, Cancelled, or Expired, and any attempt to transition from them will be rejected with InvalidSettlementState.
 
-| Function | Auth | Description |
-|----------|------|-------------|
-| `open_settlement(anchor, asset, amount)` | anchor | Reserve pool liquidity, returns a settlement id |
-| `execute_settlement(id)` | admin | Finalize a settlement and accrue its fee |
-| `cancel_settlement(id)` | anchor | Cancel and return reserved liquidity to the pool |
-| `cancel_expired_settlement(id)` | – | Reclaim a timed-out pending settlement's liquidity to the pool |
-| `set_settlement_expiry_ledgers(ledgers)` | admin | Set the ledger window after which a pending settlement may be reclaimed (0 disables) |
-| `settlement_expiry_ledgers()` | – | Read the settlement expiry window in ledgers |
-| `settlement_exists(id)` | – | Check whether a settlement exists |
-| `is_settlement_pending(id)` | – | Check whether a settlement exists and its status is `Pending` |
-| `is_settlement_expired(id)` | – | Check whether a pending settlement has passed the expiry window, without reclaiming it |
-| `settlement(id)` | – | Read a settlement record |
-| `settlement_count()` | – | Read the number of settlements |
-| `list_settlements(start, limit)` | – | Page through settlements |
-| `list_settlements_by_anchor(anchor, start, limit)` | – | Page through settlements opened by one anchor |
-| `list_settlements_by_asset(asset, start, limit)` | – | Page through settlements in one asset |
-| `list_settlements_by_anchor_and_asset(anchor, asset, start, limit)` | – | Page through settlements matching both anchor and asset |
-| `list_settlements_by_status(status, start, limit)` | – | Page through settlements in a given lifecycle state |
-| `settlement_count_by_status(status)` | – | Count every settlement in a given lifecycle state (no pagination) |
-| `total_settled_amount(status)` | – | Sum settled `amount` across every settlement in a given lifecycle state |
-| `contract_info()` | – | One-call snapshot of version, paused flag, fee, and anchor/asset/settlement counts |
+From	To	Function	Authorization	Condition
+Pending	Executed	execute_settlement(id)	admin only	Settlement must exist and be Pending
+Pending	Cancelled	cancel_settlement(id)	settlement's anchor (auth required)	Settlement must exist and be Pending
+Pending	Expired	cancel_expired_settlement(id)	permissionless (any caller)	settlement_expiry_ledgers > 0 and ledger >= opened_at + expiry
+mermaid
 
-`cancel_expired_settlement` requires no authorization: it only ever returns
+stateDiagram-v2
+    [*] --> Pending : open_settlement(anchor, asset, amount) [anchor auth]
+    Pending --> Executed : execute_settlement(id) [admin only]
+    Pending --> Cancelled : cancel_settlement(id) [anchor auth]
+    Pending --> Expired : cancel_expired_settlement(id) [permissionless, after expiry window]
+    Executed --> [*] : terminal (no exit)
+    Cancelled --> [*] : terminal (no exit)
+    Expired --> [*] : terminal (no exit)
+Terminal-state finality: Executed, Cancelled, and Expired are mutually exclusive and final. The contract enforces this by rejecting any transition call (execute_settlement, cancel_settlement, cancel_expired_settlement) on a settlement whose status is not exactly Pending (Error::InvalidSettlementState). The executable proof of this behavior is covered by the settlement lifecycle regression tests in src/test.rs (e.g. test_execute_cancelled_settlement_fails, test_execute_expired_settlement_fails, test_cancel_executed_fails, test_cancel_expired_settlement_rejects_already_executed, test_cancel_expired_settlement_rejects_before_expiry), which verify that already-terminal settlements cannot be re-transitioned.
+
+cancel_expired_settlement requires no authorization: it only ever returns
 liquidity to the shared pool it was reserved from, never to an external
 party, so anyone (including an off-chain keeper) may call it once a pending
 settlement has passed the configured expiry window.
 
-`pause` and `unpause` take an explicit `caller` argument (Soroban contracts
+pause and unpause take an explicit caller argument (Soroban contracts
 have no implicit sender) that must be either the admin or the appointed
 operator; the operator role is scoped to this one lifecycle switch and
 carries no ability to change the fee, the admin, or any other admin-only
 setting. Note that appointing the admin as its own operator is a supported
 (if redundant) dual-role configuration.
 
-#### Operator permission boundary
-
-The table below lists **every gated entrypoint** and which guard function
-it calls in [`src/lib.rs`](src/lib.rs), so integrators and delegates can
+Operator permission boundary
+The table below lists every gated entrypoint and which guard function
+it calls in src/lib.rs, so integrators and delegates can
 verify the boundary without reading individual doc comments.
 
-**`require_admin_or_operator` — admin _or_ operator may call**
+require_admin_or_operator — admin or operator may call
 
-| Entrypoint | Description |
-|---|---|
-| `pause(caller)` | Halt liquidity & settlement mutations |
-| `unpause(caller)` | Resume after a pause |
-| `extend_instance_ttl(caller)` | Extend contract instance/code TTL |
+Entrypoint	Description
+pause(caller)	Halt liquidity & settlement mutations
+unpause(caller)	Resume after a pause
+extend_instance_ttl(caller)	Extend contract instance/code TTL
+require_admin — admin only (operator excluded)
 
-**`require_admin` — admin only (operator excluded)**
+Entrypoint	Description
+set_admin(new_admin)	Transfer administration (single-step)
+propose_admin(candidate)	Initiate a two-step admin transfer
+set_operator(operator)	Appoint or replace the operator
+register_anchor(anchor)	Approve a new liquidity provider
+register_anchors(anchors)	Batch-approve liquidity providers
+deregister_anchor(anchor)	Remove an anchor from the approved set
+set_fee(bps)	Set the global protocol fee
+set_asset_fee(asset, bps)	Override the fee for one asset
+clear_asset_fee(asset)	Remove an asset's fee override
+set_fee_waiver(anchor, waived)	Grant or revoke a fee waiver
+collect_fees(asset)	Collect accrued protocol fees
+set_min_liquidity(asset, floor)	Set the minimum liquidity floor
+set_max_settlement_amount(asset, amount)	Cap per-settlement reserve size
+set_settlement_expiry_ledgers(ledgers)	Set the settlement expiry window
+execute_settlement(id)	Finalize a pending settlement
+Note: The three-entry require_admin_or_operator list and the
+fifteen-entry require_admin list are derived directly from the
+corresponding call sites in src/lib.rs. When a new entrypoint is added,
+check which guard it calls and update this table accordingly.
 
 | Entrypoint | Description |
 |---|---|
