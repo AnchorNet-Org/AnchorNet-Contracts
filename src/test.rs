@@ -1957,6 +1957,87 @@ fn test_list_anchors_reflects_reregistration() {
     assert_eq!(anchors.get(0).unwrap(), anchor);
 }
 
+/// Regression test for deregister/re-register cycle preserving balance and
+/// pool.providers state (no double-count, no reset, funds remain withdrawable).
+///
+/// Per `deregister_anchor` doc: "Existing pool liquidity is unaffected; the
+/// anchor simply cannot open new positions".
+///
+/// Covers acceptance criteria:
+/// - balances / anchor_balances / pool.providers unchanged across deregister
+/// - re-register does not reset or double-count
+/// - immediate withdraw after re-register succeeds
+/// - provide_liquidity and open_settlement blocked while deregistered
+#[test]
+fn test_deregister_re_register_preserves_balances_and_provider_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Initial state
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Deregister — balances and provider count unaffected
+    client.deregister_anchor(&anchor);
+    assert!(!client.is_anchor(&anchor));
+
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Cannot provide or open settlement while deregistered (AnchorNotRegistered)
+    let err_provide = client
+        .try_provide_liquidity(&anchor, &asset, &100)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_provide, Error::AnchorNotRegistered);
+
+    let err_settle = client
+        .try_open_settlement(&anchor, &asset, &100)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err_settle, Error::AnchorNotRegistered);
+
+    // Re-register the same anchor
+    client.register_anchor(&anchor);
+    assert!(client.is_anchor(&anchor));
+
+    // State must be exactly as before deregistration (no reset, no double-count)
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 1_000);
+    assert_eq!(pool.providers, 1);
+    let bals = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(bals.len(), 1);
+    assert_eq!(bals.get(0).unwrap(), (asset.clone(), 1_000));
+
+    // Anchor can immediately withdraw its preserved balance (no need to re-provide)
+    let withdrawn = client.withdraw_all_liquidity(&anchor, &asset);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(client.balance(&anchor, &asset), 0);
+    let pool = client.pool(&asset);
+    assert_eq!(pool.total, 0);
+    assert_eq!(pool.providers, 0);
+}
+
 #[test]
 fn test_list_anchors_pagination() {
     let env = Env::default();
@@ -2931,16 +3012,30 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    let err = client.try_pause(&operator).err().unwrap().unwrap();
-    assert_eq!(err, Error::NotAuthorized);
-    let err = client.try_unpause(&operator).err().unwrap().unwrap();
-    assert_eq!(err, Error::NotAuthorized);
-    let err = client
-        .try_extend_instance_ttl(&operator)
-        .err()
-        .unwrap()
-        .unwrap();
-    assert_eq!(err, Error::NotAuthorized);
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "pause",
+        (),
+        client.try_pause(&operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "unpause",
+        (),
+        client.try_unpause(&operator)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        operator,
+        "extend_instance_ttl",
+        (),
+        client.try_extend_instance_ttl(&operator)
+    );
 
     // Admin can still act
     client.pause(&admin);
@@ -4768,6 +4863,127 @@ fn test_provide_liquidity_multi_blocked_while_paused() {
         .unwrap()
         .unwrap();
     assert_eq!(err, Error::Paused);
+}
+
+// ---------------------------------------------------------------------------
+// provide_liquidity_multi atomicity regression tests
+//
+// The existing test_provide_liquidity_multi_rejects_duplicate_asset test only
+// covers the case where the duplicate is at the front of the batch (both
+// entries are the same asset). These regression tests verify that an invalid
+// entry appearing *later* in the requests vector — after several valid distinct
+// assets — causes zero mutations across the entire batch, including the valid
+// entries that appeared before the invalid one. This enforces the all-or-nothing
+// atomicity guarantee that provide_liquidity_multi's doc comment promises.
+// ---------------------------------------------------------------------------
+
+/// Regression test: an invalid entry (duplicate asset) appearing *later* in the
+/// batch — after several valid distinct assets — must cause zero mutations across
+/// the entire batch, including the valid entries that appeared before the invalid
+/// one. Without the two-pass validate-then-apply design, the first two legs could
+/// be partially applied before the duplicate is detected on the third.
+#[test]
+fn test_provide_liquidity_multi_zero_mutations_on_late_duplicate_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Snapshot balances and pool totals for every affected asset before the
+    // call. All are zero since no liquidity has been provided yet.
+    let bal1_before = client.balance(&anchor, &asset1);
+    let bal2_before = client.balance(&anchor, &asset2);
+    let total1_before = client.total_liquidity(&asset1);
+    let total2_before = client.total_liquidity(&asset2);
+    let providers1_before = client.pool(&asset1).providers;
+    let providers2_before = client.pool(&asset2).providers;
+
+    // First two entries are valid distinct assets; third is a duplicate of the
+    // first — the invalid entry appears *after* valid ones.
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 200),
+        (asset1.clone(), 300), // duplicate of asset1
+    ];
+    let err = client
+        .try_provide_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::DuplicateAssetInBatch);
+
+    // Verify state unchanged for every asset in the batch — including the valid
+    // ones (asset1, asset2) that appeared before the invalid entry.
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.pool(&asset1).providers, providers1_before);
+    assert_eq!(client.pool(&asset2).providers, providers2_before);
+}
+
+/// Regression test: an invalid entry (non-positive amount) appearing *later* in
+/// the batch — after several valid distinct assets — must cause zero mutations
+/// across the entire batch, including the valid entries that appeared before the
+/// invalid one. The non-positive amount is detected at a different point in the
+/// validation loop than the duplicate-asset check, so it is covered separately.
+#[test]
+fn test_provide_liquidity_multi_zero_mutations_on_late_nonpositive_failure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset1 = symbol_short!("AST1");
+    let asset2 = symbol_short!("AST2");
+    let asset3 = symbol_short!("AST3");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Snapshot balances and pool totals for every affected asset before the
+    // call. All are zero since no liquidity has been provided yet.
+    let bal1_before = client.balance(&anchor, &asset1);
+    let bal2_before = client.balance(&anchor, &asset2);
+    let bal3_before = client.balance(&anchor, &asset3);
+    let total1_before = client.total_liquidity(&asset1);
+    let total2_before = client.total_liquidity(&asset2);
+    let total3_before = client.total_liquidity(&asset3);
+    let providers1_before = client.pool(&asset1).providers;
+    let providers2_before = client.pool(&asset2).providers;
+    let providers3_before = client.pool(&asset3).providers;
+
+    // First two entries are valid distinct assets; third has a non-positive
+    // amount — the invalid entry appears *after* valid ones.
+    let requests = vec![
+        &env,
+        (asset1.clone(), 100),
+        (asset2.clone(), 200),
+        (asset3.clone(), 0), // non-positive amount
+    ];
+    let err = client
+        .try_provide_liquidity_multi(&anchor, &requests)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    // Verify state unchanged for every asset in the batch — including the valid
+    // ones (asset1, asset2) that appeared before the invalid entry.
+    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
+    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
+    assert_eq!(client.balance(&anchor, &asset3), bal3_before);
+    assert_eq!(client.total_liquidity(&asset1), total1_before);
+    assert_eq!(client.total_liquidity(&asset2), total2_before);
+    assert_eq!(client.total_liquidity(&asset3), total3_before);
+    assert_eq!(client.pool(&asset1).providers, providers1_before);
+    assert_eq!(client.pool(&asset2).providers, providers2_before);
+    assert_eq!(client.pool(&asset3).providers, providers3_before);
 }
 
 #[test]
