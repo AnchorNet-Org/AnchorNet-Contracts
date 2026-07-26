@@ -217,16 +217,28 @@ The compiled wasm embeds Name and Description entries (via
 contractmeta!) so tooling that inspects the deployed contract can identify
 it without an off-chain registry.
 
-Commands
-Command	Description
-cargo build	Build the contract
-cargo test	Run unit tests
-cargo fmt --all	Format code
-cargo fmt --all -- --check	Check formatting (CI)
-Contributing
-Fork the repo and create a branch from main.
-Make changes; keep formatting with cargo fmt --all.
-Run cargo fmt --all -- --check, cargo build, and cargo test.
-Open a pull request. CI will run format check, build, and tests.
-License
+## Commands
+
+| Command | Description |
+|--------|-------------|
+| `cargo build` | Build the contract |
+| `cargo test` | Run unit tests |
+| `cargo fmt --all` | Format code |
+| `cargo fmt --all -- --check` | Check formatting (CI) |
+
+## Contributing
+
+1. Fork the repo and create a branch from `main`.
+2. Make changes; keep formatting with `cargo fmt --all`.
+3. Run `cargo fmt --all -- --check`, `cargo build`, and `cargo test`.
+4. Update `CHANGELOG.md` by adding a corresponding entry under `## [Unreleased]`
+   for every pull request that introduces user-facing or codebase changes.
+5. Open a pull request. CI will run format check, build, and tests.
+
+Follow the existing `Keep a Changelog` category headings in `## [Unreleased]`
+when adding entries: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or
+`Security`.
+
+## License
+
 MIT
