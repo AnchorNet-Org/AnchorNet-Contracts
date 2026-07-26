@@ -4359,6 +4359,54 @@ fn test_settlement_count_by_status_is_zero_with_no_settlements() {
 }
 
 #[test]
+fn test_anchor_settlement_count_counts_only_that_anchor() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.provide_liquidity(&a1, &usdc, &1_000);
+    client.provide_liquidity(&a2, &usdc, &1_000);
+
+    // a1 opens 3, a2 opens 2, interleaved
+    client.open_settlement(&a1, &usdc, &100);
+    client.open_settlement(&a2, &usdc, &100);
+    client.open_settlement(&a1, &usdc, &100);
+    client.open_settlement(&a2, &usdc, &100);
+    client.open_settlement(&a1, &usdc, &100);
+
+    assert_eq!(client.anchor_settlement_count(&a1), 3);
+    assert_eq!(client.anchor_settlement_count(&a2), 2);
+}
+
+#[test]
+fn test_anchor_settlement_count_zero_for_unknown_anchor() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    let stranger = Address::generate(&env);
+
+    assert_eq!(client.anchor_settlement_count(&stranger), 0);
+}
+
+#[test]
+fn test_anchor_settlement_count_zero_when_none_opened() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    assert_eq!(client.anchor_settlement_count(&anchor), 0);
+}
+
+#[test]
 fn test_contract_info_reflects_current_state() {
     let env = Env::default();
     let (client, admin, anchor, asset) = funded(&env, 1_000);

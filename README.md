@@ -22,39 +22,16 @@ cargo fmt --all -- --check
 cargo build
 cargo test
 Project structure
-
-lib.rs
- – contract entrypoint and public interface
-
-error.rs
- – error codes returned to clients
-
-
-ADMIN.md
- – privileged admin/operator roles, lifecycle, and security properties
-
-
-ERRORS.md
- – stable error-code reference and originating entrypoints
-
-
-PAGINATION.md
- – stable pagination semantics reference and worked examples
-
-types.rs
- – on-chain data types (Pool)
-
-storage.rs
- – storage keys and TTL-aware accessors
-
-events.rs
- – event publishing helpers
-
-test.rs
- – unit tests
-
-Cargo.toml
- – dependencies and crate config
+src/lib.rs – contract entrypoint and public interface
+src/error.rs – error codes returned to clients
+docs/ADMIN.md – privileged admin/operator roles, lifecycle, and security properties
+docs/ERRORS.md – stable error-code reference and originating entrypoints
+docs/PAGINATION.md – stable pagination semantics reference and worked examples
+src/types.rs – on-chain data types (Pool)
+src/storage.rs – storage keys and TTL-aware accessors
+src/events.rs – event publishing helpers
+src/test.rs – unit tests
+Cargo.toml – dependencies and crate config
 Contract interface
 The AnchornetContract tracks per-asset liquidity pools funded by registered
 anchors. The off-chain indexer subscribes to the emitted events to mirror pool
@@ -136,9 +113,10 @@ settlement_count()	–	Read the number of settlements
 list_settlements(start, limit)	–	Page through settlements
 list_settlements_by_anchor(anchor, start, limit)	–	Page through settlements opened by one anchor
 list_settlements_by_asset(asset, start, limit)	–	Page through settlements in one asset
-list_settlements_by_anchor_asset(anchor, asset, start, limit)	–	Page through settlements matching both anchor and asset
+list_settlements_by_anchor_and_asset(anchor, asset, start, limit)	–	Page through settlements matching both anchor and asset
 list_settlements_by_status(status, start, limit)	–	Page through settlements in a given lifecycle state
 settlement_count_by_status(status)	–	Count every settlement in a given lifecycle state (no pagination)
+anchor_settlement_count(anchor)	–	Count every settlement ever opened by one anchor (no pagination)
 total_settled_amount(status)	–	Sum settled amount across every settlement in a given lifecycle state
 contract_info()	–	One-call snapshot of version, paused flag, fee, and anchor/asset/settlement counts
 cancel_expired_settlement requires no authorization: it only ever returns
@@ -155,10 +133,7 @@ setting. Note that appointing the admin as its own operator is a supported
 
 Operator permission boundary
 The table below lists every gated entrypoint and which guard function
-it calls in 
-
-lib.rs
-, so integrators and delegates can
+it calls in src/lib.rs, so integrators and delegates can
 verify the boundary without reading individual doc comments.
 
 require_admin_or_operator — admin or operator may call
@@ -187,9 +162,7 @@ set_settlement_expiry_ledgers(ledgers)	Set the settlement expiry window
 execute_settlement(id)	Finalize a pending settlement
 Note: The three-entry require_admin_or_operator list and the
 fifteen-entry require_admin list are derived directly from the
-corresponding call sites in 
-lib.rs
-. When a new entrypoint is added,
+corresponding call sites in src/lib.rs. When a new entrypoint is added,
 check which guard it calls and update this table accordingly.
 
 Events
@@ -211,7 +184,6 @@ Events
 ("minliq", asset) – minimum liquidity floor configured
 ("operator",) – operator appointed or replaced
 ("op_clear",) – operator role revoked
-("ttl",) – contract instance/code TTL extended
 Contract metadata
 The compiled wasm embeds Name and Description entries (via
 contractmeta!) so tooling that inspects the deployed contract can identify
