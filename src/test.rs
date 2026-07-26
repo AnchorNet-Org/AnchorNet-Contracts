@@ -1895,6 +1895,143 @@ fn test_fee_waiver_unset_by_default() {
     assert!(!client.is_fee_waived(&anchor));
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: flipping a fee waiver never rewrites a settlement that is
+// already open (issue #144).
+//
+// `open_settlement` snapshots the fee once, reading `is_fee_waived` at open
+// time (lib.rs, the `let fee = if storage::is_fee_waived(..)` branch), and
+// `execute_settlement` accrues `settlement.fee` directly — it never re-reads
+// the waiver. The tests below toggle the waiver in both directions while a
+// settlement sits Pending and pin the invariant on four distinct views of
+// the same state, so a future implementation that recomputes at execute
+// time fails here rather than silently mispricing:
+//
+//   1. `Settlement.fee` on the stored record (immutability post-open).
+//   2. The `fees_accrued` delta produced by `execute_settlement`.
+//   3. Record and delta agreeing numerically — a `fees_accrued`-only test
+//      would pass against a broken impl that recomputed to the same number.
+//   4. `waived_fee_volume`, which the waived branch of `open_settlement`
+//      also writes: the forgone-revenue counter must be decided at open
+//      time too, and must not move when the waiver later changes.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_fee_waiver_granted_after_open_does_not_reduce_accrued_fee() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1%
+
+    assert!(
+        !client.is_fee_waived(&anchor),
+        "precondition: anchor unwaived"
+    );
+
+    // Opened while unwaived: the record freezes a non-zero fee, and the
+    // waived-volume counter is untouched because the waived branch never ran.
+    let id = client.open_settlement(&anchor, &asset, &400_000);
+    let frozen_fee = client.settlement(&id).fee;
+    assert_eq!(
+        frozen_fee, 4_000,
+        "unwaived anchor must snapshot the 1% fee"
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    let accrued_before = client.fees_accrued(&asset);
+
+    // The flip mid-flight, while the settlement is still Pending.
+    client.set_fee_waiver(&anchor, &true);
+    assert!(client.is_fee_waived(&anchor));
+
+    // 1. The record is unchanged by the flip.
+    assert_eq!(
+        client.settlement(&id).fee,
+        frozen_fee,
+        "Settlement.fee must not change retroactively when the waiver is granted",
+    );
+    // 4. The waiver came too late to count as forgone revenue.
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        0,
+        "a waiver granted after open must not retroactively book forgone revenue",
+    );
+
+    client.execute_settlement(&id);
+
+    // 2. Accrual used the frozen fee, not the now-waived recomputation.
+    let delta = client.fees_accrued(&asset) - accrued_before;
+    assert_eq!(
+        delta, frozen_fee,
+        "fees_accrued must grow by the snapshotted fee, not by 0",
+    );
+    // 3. Both views report the same number.
+    assert_eq!(
+        client.settlement(&id).fee,
+        delta,
+        "record and accrual delta must reflect the same frozen fee",
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+}
+
+#[test]
+fn test_fee_waiver_revoked_after_open_does_not_charge_pending_settlement() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1%
+
+    client.set_fee_waiver(&anchor, &true);
+    assert!(client.is_fee_waived(&anchor), "precondition: anchor waived");
+
+    // Opened while waived: the record freezes a zero fee, and the notional
+    // fee is booked as forgone revenue at that moment.
+    let id = client.open_settlement(&anchor, &asset, &400_000);
+    assert_eq!(
+        client.settlement(&id).fee,
+        0,
+        "waived anchor must snapshot a zero fee",
+    );
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        4_000,
+        "the waived branch books the notional fee as forgone revenue",
+    );
+
+    let accrued_before = client.fees_accrued(&asset);
+
+    // The revoke mid-flight, while the settlement is still Pending.
+    client.set_fee_waiver(&anchor, &false);
+    assert!(!client.is_fee_waived(&anchor));
+
+    // 1. The record is unchanged by the revoke.
+    assert_eq!(
+        client.settlement(&id).fee,
+        0,
+        "Settlement.fee must stay 0 when the waiver is revoked mid-flight",
+    );
+    // 4. Revoking does not un-book revenue already forgone at open time.
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        4_000,
+        "a revoke after open must not rewind the forgone-revenue counter",
+    );
+
+    client.execute_settlement(&id);
+
+    // 2. Nothing accrued: the settlement was priced at zero and stays there.
+    let delta = client.fees_accrued(&asset) - accrued_before;
+    assert_eq!(
+        delta, 0,
+        "fees_accrued must not grow for a settlement opened under a waiver",
+    );
+    // 3. Both views agree at zero.
+    assert_eq!(
+        client.settlement(&id).fee,
+        delta,
+        "record and accrual delta must both be zero",
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 4_000);
+}
+
 #[test]
 fn test_cancel_restores_liquidity_with_fee_set() {
     let env = Env::default();
