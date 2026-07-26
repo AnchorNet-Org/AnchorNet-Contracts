@@ -22,39 +22,16 @@ cargo fmt --all -- --check
 cargo build
 cargo test
 Project structure
-
-lib.rs
- – contract entrypoint and public interface
-
-error.rs
- – error codes returned to clients
-
-
-ADMIN.md
- – privileged admin/operator roles, lifecycle, and security properties
-
-
-ERRORS.md
- – stable error-code reference and originating entrypoints
-
-
-PAGINATION.md
- – stable pagination semantics reference and worked examples
-
-types.rs
- – on-chain data types (Pool)
-
-storage.rs
- – storage keys and TTL-aware accessors
-
-events.rs
- – event publishing helpers
-
-test.rs
- – unit tests
-
-Cargo.toml
- – dependencies and crate config
+src/lib.rs – contract entrypoint and public interface
+src/error.rs – error codes returned to clients
+docs/ADMIN.md – privileged admin/operator roles, lifecycle, and security properties
+docs/ERRORS.md – stable error-code reference and originating entrypoints
+docs/PAGINATION.md – stable pagination semantics reference and worked examples
+src/types.rs – on-chain data types (Pool)
+src/storage.rs – storage keys and TTL-aware accessors
+src/events.rs – event publishing helpers
+src/test.rs – unit tests
+Cargo.toml – dependencies and crate config
 Contract interface
 The AnchornetContract tracks per-asset liquidity pools funded by registered
 anchors. The off-chain indexer subscribes to the emitted events to mirror pool
@@ -89,7 +66,35 @@ set_min_liquidity(asset, floor)	admin	Set the minimum liquidity floor an asset's
 min_liquidity(asset)	–	Read the minimum liquidity floor configured for an asset
 set_max_settlement_amount(asset, amount)	admin	Cap the amount a single settlement may reserve for an asset (0 disables)
 max_settlement_amount(asset)	–	Read the maximum settlement amount configured for an asset
-is_max_settlement_amt_configured(asset)	–	Check whether the max settlement cap was explicitly configured, including to zero (AnchornetContractClient also exposes is_max_settlement_amount_configured as a Rust convenience alias)
+⚠️ Storage note — append-only anchor & asset lists
+
+The backing stores for register_anchor / register_anchors /
+list_anchors / anchor_count (the AnchorList persistent entry in
+src/storage.rs) and list_assets / asset_count (the AssetList
+entry) are append-only. Every new anchor or asset is appended to a
+single monolithic Vec that is rewritten in its entirety on each
+registration. deregister_anchor flips the per-address boolean but does
+not remove the address from AnchorList; likewise, an asset is never
+removed from AssetList even if all liquidity is withdrawn.
+
+Practical ceiling. Because each append reads, scans for duplicates,
+and rewrites the whole list, the cost of a single register_anchor or
+register_anchors call grows linearly with the accumulated list size.
+Until the storage refactor lands, plan to stay below roughly 500
+total accumulated anchors and ~200 distinct assets to remain
+comfortably within Soroban's per-transaction instruction budget
+(~100 million instructions for a classic transaction). Batch
+register_anchors calls with very large input vectors on an already
+large list are the most likely to hit the budget ceiling first.
+
+Tracking. A refactor that replaces the monolithic Vec with a
+per-entry keyed layout (removing the O(n) rewrite on every append and
+enabling compaction of deregistered anchors) is tracked in
+AnchorNet-Org/AnchorNet-Contracts#124.
+The cost model described above is expected to change once that issue is
+resolved; check it for current status before planning large-scale
+anchor or asset onboarding.
+
 Admin & lifecycle
 Function	Auth	Description
 pause(caller) / unpause(caller)	admin or operator	Halt or resume liquidity & settlement mutations
@@ -137,7 +142,7 @@ settlement_count()	–	Read the number of settlements
 list_settlements(start, limit)	–	Page through settlements
 list_settlements_by_anchor(anchor, start, limit)	–	Page through settlements opened by one anchor
 list_settlements_by_asset(asset, start, limit)	–	Page through settlements in one asset
-list_settlements_by_anchor_asset(anchor, asset, start, limit)	–	Page through settlements matching both anchor and asset (AnchornetContractClient also exposes the previous list_settlements_by_anchor_and_asset Rust alias)
+list_settlements_by_anchor_and_asset(anchor, asset, start, limit)	–	Page through settlements matching both anchor and asset
 list_settlements_by_status(status, start, limit)	–	Page through settlements in a given lifecycle state
 settlement_count_by_status(status)	–	Count every settlement in a given lifecycle state (no pagination)
 total_settled_amount(status)	–	Sum settled amount across every settlement in a given lifecycle state
@@ -156,10 +161,7 @@ setting. Note that appointing the admin as its own operator is a supported
 
 Operator permission boundary
 The table below lists every gated entrypoint and which guard function
-it calls in 
-
-lib.rs
-, so integrators and delegates can
+it calls in src/lib.rs, so integrators and delegates can
 verify the boundary without reading individual doc comments.
 
 require_admin_or_operator — admin or operator may call
@@ -188,9 +190,7 @@ set_settlement_expiry_ledgers(ledgers)	Set the settlement expiry window
 execute_settlement(id)	Finalize a pending settlement
 Note: The three-entry require_admin_or_operator list and the
 fifteen-entry require_admin list are derived directly from the
-corresponding call sites in 
-lib.rs
-. When a new entrypoint is added,
+corresponding call sites in src/lib.rs. When a new entrypoint is added,
 check which guard it calls and update this table accordingly.
 
 Events
@@ -217,28 +217,16 @@ The compiled wasm embeds Name and Description entries (via
 contractmeta!) so tooling that inspects the deployed contract can identify
 it without an off-chain registry.
 
-## Commands
-
-| Command | Description |
-|--------|-------------|
-| `cargo build` | Build the contract |
-| `cargo test` | Run unit tests |
-| `cargo fmt --all` | Format code |
-| `cargo fmt --all -- --check` | Check formatting (CI) |
-
-## Contributing
-
-1. Fork the repo and create a branch from `main`.
-2. Make changes; keep formatting with `cargo fmt --all`.
-3. Run `cargo fmt --all -- --check`, `cargo build`, and `cargo test`.
-4. Update `CHANGELOG.md` by adding a corresponding entry under `## [Unreleased]`
-   for every pull request that introduces user-facing or codebase changes.
-5. Open a pull request. CI will run format check, build, and tests.
-
-Follow the existing `Keep a Changelog` category headings in `## [Unreleased]`
-when adding entries: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or
-`Security`.
-
-## License
-
+Commands
+Command	Description
+cargo build	Build the contract
+cargo test	Run unit tests
+cargo fmt --all	Format code
+cargo fmt --all -- --check	Check formatting (CI)
+Contributing
+Fork the repo and create a branch from main.
+Make changes; keep formatting with cargo fmt --all.
+Run cargo fmt --all -- --check, cargo build, and cargo test.
+Open a pull request. CI will run format check, build, and tests.
+License
 MIT
