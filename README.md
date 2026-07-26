@@ -118,12 +118,29 @@ list_settlements_by_status(status, start, limit)	–	Page through settlements in
 settlement_count_by_status(status)	–	Count every settlement in a given lifecycle state (no pagination)
 total_settled_amount(status)	–	Sum settled amount across every settlement in a given lifecycle state
 contract_info()	–	One-call snapshot of version, paused flag, fee, and anchor/asset/settlement counts
+Settlement lifecycle (state machine)
+SettlementStatus has four variants: Pending, Executed, Cancelled, Expired. Only the three one-way transitions shown below are valid. All three destination states are terminal — no further transition is possible from Executed, Cancelled, or Expired, and any attempt to transition from them will be rejected with InvalidSettlementState.
+
+From	To	Function	Authorization	Condition
+Pending	Executed	execute_settlement(id)	admin only	Settlement must exist and be Pending
+Pending	Cancelled	cancel_settlement(id)	settlement's anchor (auth required)	Settlement must exist and be Pending
+Pending	Expired	cancel_expired_settlement(id)	permissionless (any caller)	settlement_expiry_ledgers > 0 and ledger >= opened_at + expiry
+mermaid
+
+stateDiagram-v2
+    [*] --> Pending : open_settlement(anchor, asset, amount) [anchor auth]
+    Pending --> Executed : execute_settlement(id) [admin only]
+    Pending --> Cancelled : cancel_settlement(id) [anchor auth]
+    Pending --> Expired : cancel_expired_settlement(id) [permissionless, after expiry window]
+    Executed --> [*] : terminal (no exit)
+    Cancelled --> [*] : terminal (no exit)
+    Expired --> [*] : terminal (no exit)
+Terminal-state finality: Executed, Cancelled, and Expired are mutually exclusive and final. The contract enforces this by rejecting any transition call (execute_settlement, cancel_settlement, cancel_expired_settlement) on a settlement whose status is not exactly Pending (Error::InvalidSettlementState). The executable proof of this behavior is covered by the settlement lifecycle regression tests in src/test.rs (e.g. test_execute_cancelled_settlement_fails, test_execute_expired_settlement_fails, test_cancel_executed_fails, test_cancel_expired_settlement_rejects_already_executed, test_cancel_expired_settlement_rejects_before_expiry), which verify that already-terminal settlements cannot be re-transitioned.
+
 cancel_expired_settlement requires no authorization: it only ever returns
 liquidity to the shared pool it was reserved from, never to an external
 party, so anyone (including an off-chain keeper) may call it once a pending
 settlement has passed the configured expiry window.
-
-Keeper Workflow: Off-chain keepers are expected to call oldest_pending_settlement_id(asset) to discover the oldest pending settlement for an asset, and then call cancel_expired_settlement(id) if it has expired. This minimizes wasteful calls to not-yet-expired ids.
 
 pause and unpause take an explicit caller argument (Soroban contracts
 have no implicit sender) that must be either the admin or the appointed
