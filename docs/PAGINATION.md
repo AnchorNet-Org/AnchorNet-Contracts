@@ -1,47 +1,45 @@
-# Pagination Semantics
-
-This document catalogues the start and limit semantics across every paginated entrypoint in the AnchorNet contract. The contract provides ten distinct `list_*/paginated` entrypoints.
+Pagination Semantics
+This document catalogues the start and limit semantics across every paginated entrypoint in the AnchorNet contract. The contract provides ten distinct list_*/paginated entrypoints.
 
 There are two primary paradigms for pagination in the contract:
-1. **Index-based Pagination:** The `start` parameter is a 0-based list index.
-2. **ID-based Pagination:** The `start` parameter is a 1-based sequential ID.
 
-Both paradigms support filtering, where non-matching entries are skipped without counting toward the `limit`.
+Index-based Pagination: The start parameter is a 0-based list index.
+ID-based Pagination: The start parameter is a 1-based sequential ID.
+Both paradigms support filtering, where non-matching entries are skipped without counting toward the limit.
 
-## Entrypoints Catalog
+Entrypoints Catalog
+Index-based Entrypoints
+These entrypoints scan a persistent underlying list starting from a 0-based list index. The start parameter is a u32 index.
 
-### Index-based Entrypoints
-These entrypoints scan a persistent underlying list starting from a 0-based list index. The `start` parameter is a `u32` index.
+list_anchors(start: u32, limit: u32): Pages through currently registered anchors. Deregistered anchors are skipped without counting toward limit.
+list_fee_waived_anchors(start: u32, limit: u32): Pages through registered anchors, filtering for those with an active fee waiver. Non-matching/deregistered anchors are skipped without counting.
+list_assets(start: u32, limit: u32): Pages through every asset that has ever had liquidity provided, without filtering until limit is reached.
+anchor_balances(provider: Address, start: u32, limit: u32): Pages through the known assets list, returning non-zero balances for a provider. Assets with zero balance are skipped without counting.
+ID-based Entrypoints
+These entrypoints iterate over settlements using a 1-based sequential ID. The start parameter is a u64 settlement ID. If start is 0, it behaves identically to start being 1. Missing IDs (e.g. if skipped internally) and non-matching entries do not count toward the limit.
 
-- `list_anchors(start: u32, limit: u32)`: Pages through currently registered anchors. Deregistered anchors are skipped without counting toward `limit`.
-- `list_fee_waived_anchors(start: u32, limit: u32)`: Pages through registered anchors, filtering for those with an active fee waiver. Non-matching/deregistered anchors are skipped without counting.
-- `list_assets(start: u32, limit: u32)`: Pages through every asset that has ever had liquidity provided, without filtering until `limit` is reached.
-- `anchor_balances(provider: Address, start: u32, limit: u32)`: Pages through the known assets list, returning non-zero balances for a provider. Assets with zero balance are skipped without counting.
+list_settlements(start: u64, limit: u32): Pages through all settlements. Missing IDs are skipped without counting.
+list_settlements_by_anchor(anchor: Address, start: u64, limit: u32): Pages through settlements opened by anchor. Missing or non-matching IDs are skipped without counting.
+list_settlements_by_asset(asset: Symbol, start: u64, limit: u32): Pages through settlements in asset. Missing or non-matching IDs are skipped without counting.
+list_settlements_by_status(status: SettlementStatus, start: u64, limit: u32): Pages through settlements matching status. Missing or non-matching IDs are skipped without counting.
+list_settlements_anchor_asset(anchor: Address, asset: Symbol, start: u64, limit: u32): Pages through settlements matching both anchor and asset. Missing or non-matching IDs are skipped without counting.
+list_settlements_anchor_status(anchor: Address, status: SettlementStatus, start: u64, limit: u32): Pages through settlements matching both anchor and status, answering "which of my settlements are still Pending?" in one call. Missing or non-matching IDs are skipped without counting.
+Naming note: the two compound filters omit the by_ infix because Soroban caps exported contract function names at 32 characters (SCSYMBOL_LIMIT). The fully spelled list_settlements_by_anchor_and_status is 37 characters and fails to compile.
 
-### ID-based Entrypoints
-These entrypoints iterate over settlements using a 1-based sequential ID. The `start` parameter is a `u64` settlement ID. If `start` is 0, it behaves identically to `start` being 1. Missing IDs (e.g. if skipped internally) and non-matching entries do not count toward the `limit`.
+Note: If additional compound filters are added to the contract, they will inherit the same ID-based start semantics and skip-without-counting behavior as the existing settlement filters.
 
-- `list_settlements(start: u64, limit: u32)`: Pages through all settlements. Missing IDs are skipped without counting.
-- `list_settlements_by_anchor(anchor: Address, start: u64, limit: u32)`: Pages through settlements opened by `anchor`. Missing or non-matching IDs are skipped without counting.
-- `list_settlements_by_asset(asset: Symbol, start: u64, limit: u32)`: Pages through settlements in `asset`. Missing or non-matching IDs are skipped without counting.
-- `list_settlements_by_status(status: SettlementStatus, start: u64, limit: u32)`: Pages through settlements matching `status`. Missing or non-matching IDs are skipped without counting.
-
-> **Note:** If additional compound filters are added to the contract, they will inherit the same ID-based start semantics and skip-without-counting behavior as the existing settlement filters.
-
-## Skip-without-counting Behavior
-
-For all filtered variants (e.g. `list_fee_waived_anchors`, `list_settlements_by_anchor`, etc.), the underlying list or ID sequence is scanned until `limit` *matching* entries are accumulated or the end of the sequence is reached. Skipped items do not decrement the `limit` budget. This means a caller asking for `limit = 10` will always receive up to 10 matching entries, regardless of how many non-matching entries reside between them.
+Skip-without-counting Behavior
+For all filtered variants (e.g. list_fee_waived_anchors, list_settlements_by_anchor, etc.), the underlying list or ID sequence is scanned until limit matching entries are accumulated or the end of the sequence is reached. Skipped items do not decrement the limit budget. This means a caller asking for limit = 10 will always receive up to 10 matching entries, regardless of how many non-matching entries reside between them.
 
 Off-chain clients that mishandle the id-based vs. index-based distinction, or that miscount skipped entries against limit, risk building an incomplete or duplicated view of anchors, assets, or settlements.
 
-## Worked Examples
+Worked Examples
+Example 1: Index-based Pagination
+When paginating over index-based endpoints that include filters (like list_anchors), the caller does not inherently know how many items were skipped in the underlying storage array, meaning they don't know the exact idx where the contract stopped scanning.
+However, because the contract scans at least limit items to return limit matches, a client can guarantee they never miss an item by advancing start by limit in each iteration, while using a Set to deduplicate overlapping items. If an endpoint does not filter (like list_assets), no deduplication is necessary because results.length exactly matches the number of scanned items.
 
-### Example 1: Index-based Pagination
+JavaScript
 
-When paginating over index-based endpoints that include filters (like `list_anchors`), the caller does not inherently know how many items were skipped in the underlying storage array, meaning they don't know the exact `idx` where the contract stopped scanning.
-However, because the contract scans *at least* `limit` items to return `limit` matches, a client can guarantee they never miss an item by advancing `start` by `limit` in each iteration, while using a `Set` to deduplicate overlapping items. If an endpoint does not filter (like `list_assets`), no deduplication is necessary because `results.length` exactly matches the number of scanned items.
-
-```javascript
 // Example: Fully paginating through list_anchors (Index-based)
 let start = 0;
 const limit = 50;
@@ -63,13 +61,11 @@ while (true) {
     // deregistered anchors were skipped. The Set handles deduplication.
     start += limit;
 }
-```
+Example 2: ID-based Pagination
+ID-based endpoints return structures that contain their own IDs (e.g. Settlement objects). To paginate, the caller simply inspects the highest ID received in the current page, and requests the next page starting at highest_id + 1.
 
-### Example 2: ID-based Pagination
+JavaScript
 
-ID-based endpoints return structures that contain their own IDs (e.g. `Settlement` objects). To paginate, the caller simply inspects the highest ID received in the current page, and requests the next page starting at `highest_id + 1`.
-
-```javascript
 // Example: Fully paginating through list_settlements_by_asset (ID-based)
 let start = 1n; // IDs are 1-based u64
 const limit = 50;
@@ -85,4 +81,3 @@ while (true) {
     const lastSettlement = page[page.length - 1];
     start = lastSettlement.id + 1n;
 }
-```
