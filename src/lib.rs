@@ -84,6 +84,26 @@ impl AnchornetContract {
     /// Returns [`Error::InvalidAdminCandidate`] if `candidate` is the same as
     /// the current administrator, since a no-op proposal would produce events
     /// with no actual authority change.
+    ///
+    /// # A pending proposal grants and removes nothing
+    ///
+    /// This writes only the pending-admin entry. Administrative authority is
+    /// resolved live from the admin entry on every call, so for as long as the
+    /// proposal is outstanding:
+    ///
+    /// - the current administrator keeps **unrestricted** authority, including
+    ///   the ability to call `propose_admin` again and redirect or effectively
+    ///   withdraw the proposal; and
+    /// - `candidate` gains **no** authority whatsoever beyond
+    ///   [`accept_admin`](Self::accept_admin).
+    ///
+    /// This is deliberate. Freezing any part of the current administrator's
+    /// authority while a proposal is pending would let a transfer to an
+    /// unreachable or unresponsive candidate strand the contract without a
+    /// fully capable admin, turning a routine handover into a denial of
+    /// service. Authority moves in a single step, when
+    /// [`accept_admin`](Self::accept_admin) succeeds, and not before.
+    /// Regression tests lock in all three phases (see `test.rs`, issue #130).
     pub fn propose_admin(env: Env, candidate: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
         if candidate == storage::get_admin(&env) {
@@ -189,6 +209,7 @@ impl AnchornetContract {
     pub fn extend_instance_ttl(env: Env, caller: Address) -> Result<(), Error> {
         Self::require_admin_or_operator(&env, &caller)?;
         storage::extend_instance_ttl(&env);
+        events::instance_ttl_extended(&env);
         Ok(())
     }
 
@@ -223,10 +244,7 @@ impl AnchornetContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Self::calculate_fee(
-            amount,
-            Self::effective_fee_bps(&env, &asset),
-        )
+        Self::calculate_fee(amount, Self::effective_fee_bps(&env, &asset))
     }
 
     /// Grants or revokes a protocol fee waiver for `anchor`. While waived,
@@ -301,6 +319,13 @@ impl AnchornetContract {
     /// Returns the settlement expiry window in ledgers (zero if disabled).
     pub fn settlement_expiry_ledgers(env: Env) -> u32 {
         storage::get_settlement_expiry_ledgers(&env)
+    }
+
+    /// Returns `true` if the settlement expiry window has been explicitly
+    /// configured by the admin, including an explicit zero value that disables
+    /// expiry. Returns `false` only when the expiry window has never been set.
+    pub fn is_settlement_expiry_configured(env: Env) -> bool {
+        storage::has_settlement_expiry_ledgers(&env)
     }
 
     /// Returns up to `limit` currently registered anchors that hold an active
@@ -520,6 +545,16 @@ impl AnchornetContract {
         storage::get_min_liquidity(&env, &asset)
     }
 
+    /// Returns `true` if `asset` has a configured minimum liquidity entry.
+    ///
+    /// This distinguishes a never-configured asset from one whose floor was
+    /// explicitly set to zero to intentionally disable the withdrawal check;
+    /// both cases continue to make [`min_liquidity`](Self::min_liquidity)
+    /// return `0`.
+    pub fn is_min_liquidity_configured(env: Env, asset: Symbol) -> bool {
+        storage::has_min_liquidity(&env, &asset)
+    }
+
     /// Sets the maximum amount a single [`open_settlement`](Self::open_settlement)
     /// call may reserve for `asset`. A call above this cap fails with
     /// [`Error::AboveMaxSettlementAmount`]. Zero (the default) disables the
@@ -538,6 +573,17 @@ impl AnchornetContract {
     /// disabled).
     pub fn max_settlement_amount(env: Env, asset: Symbol) -> i128 {
         storage::get_max_settlement_amount(&env, &asset)
+    }
+
+    /// Returns `true` if [`set_max_settlement_amount`](Self::set_max_settlement_amount)
+    /// has ever been called for `asset`, including with an explicit zero that
+    /// disables the cap. This view disambiguates an unset cap from an
+    /// admin-configured zero without changing settlement enforcement.
+    ///
+    /// The on-chain export uses `amt` rather than `amount` to stay within
+    /// Soroban's 32-byte contract-function symbol limit.
+    pub fn is_max_settlement_amt_configured(env: Env, asset: Symbol) -> bool {
+        storage::has_max_settlement_amount(&env, &asset)
     }
 
     /// Withdraws `amount` of liquidity in `asset` back to `provider`.
@@ -637,6 +683,31 @@ impl AnchornetContract {
     /// Opens a settlement that reserves `amount` of `asset` liquidity for the
     /// requesting `anchor`. The reserved amount leaves the available pool and a
     /// [`SettlementStatus::Pending`] record is created. Returns the new id.
+    ///
+    /// # Error surface vs [`pool`](Self::pool)
+    ///
+    /// Called with a positive amount on an asset that has never had liquidity
+    /// provided, this returns [`Error::InsufficientLiquidity`] — never
+    /// [`Error::PoolNotFound`]. The two entrypoints take different paths over
+    /// the same underlying state:
+    ///
+    /// - `open_settlement` fetches the pool with `storage::get_pool`, which
+    ///   materializes a zero-liquidity `Pool::empty(asset)` for a missing
+    ///   entry, so the `pool.total < amount` check below trips first for any
+    ///   positive amount.
+    /// - [`pool`](Self::pool) checks entry existence directly and returns
+    ///   [`Error::PoolNotFound`] for that same missing entry.
+    ///
+    /// Integrators must not assume the two agree: an
+    /// [`Error::InsufficientLiquidity`] here may mean the asset was never
+    /// funded at all, not merely that it is under-funded right now. Callers
+    /// that need to tell those apart should consult [`pool`](Self::pool).
+    ///
+    /// The divergence is a consequence of validation order, which is also
+    /// load-bearing for the error a caller sees: `amount <= 0` yields
+    /// [`Error::InvalidAmount`] and an unregistered anchor yields
+    /// [`Error::AnchorNotRegistered`], both *before* the pool is ever read.
+    /// Regression tests lock in all of this (see `test.rs`, issue #152).
     pub fn open_settlement(
         env: Env,
         anchor: Address,
@@ -725,7 +796,10 @@ impl AnchornetContract {
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
+        pool.total = pool
+            .total
+            .checked_add(settlement.amount)
+            .ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Cancelled;
@@ -776,7 +850,10 @@ impl AnchornetContract {
         }
 
         let mut pool = storage::get_pool(&env, &settlement.asset);
-        pool.total = pool.total.checked_add(settlement.amount).ok_or(Error::Overflow)?;
+        pool.total = pool
+            .total
+            .checked_add(settlement.amount)
+            .ok_or(Error::Overflow)?;
         storage::set_pool(&env, &settlement.asset, &pool);
 
         settlement.status = SettlementStatus::Expired;
@@ -1033,7 +1110,11 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
-    pub fn list_settlements_by_anchor_and_asset(
+    ///
+    /// The on-chain export omits `and` to stay within Soroban's 32-byte
+    /// contract-function symbol limit; the generated Rust client keeps the old
+    /// longer spelling as a convenience alias below.
+    pub fn list_settlements_by_anchor_asset(
         env: Env,
         anchor: Address,
         asset: Symbol,
@@ -1046,6 +1127,46 @@ impl AnchornetContract {
         while id <= count && (out.len() as u32) < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.anchor == anchor && settlement.asset == asset {
+                    out.push_back(settlement);
+                }
+            }
+            id += 1;
+        }
+        out
+    }
+
+    /// Returns up to `limit` settlements matching both `anchor` and `status`,
+    /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
+    /// missing or non-matching ids are skipped without counting toward `limit`.
+    ///
+    /// Answers "which of my settlements are still
+    /// [`Pending`](SettlementStatus::Pending)?" in a single call. Combining
+    /// both filters on-chain spares callers a client-side filtering step whose
+    /// cost scales with the anchor's entire settlement history rather than just
+    /// the matching subset — useful for an anchor checking its outstanding
+    /// exposure before opening a new settlement near a risk limit.
+    ///
+    /// Named without the `by_` infix because Soroban caps exported contract
+    /// function names at 32 characters (`SCSYMBOL_LIMIT`); the fully spelled
+    /// `list_settlements_by_anchor_and_status` is 37 and fails to compile.
+    ///
+    /// Mirrors the pagination semantics of
+    /// [`list_settlements_by_anchor`](Self::list_settlements_by_anchor) and
+    /// [`list_settlements_by_status`](Self::list_settlements_by_status),
+    /// filtering on both fields in one scan instead of either alone.
+    pub fn list_settlements_anchor_status(
+        env: Env,
+        anchor: Address,
+        status: SettlementStatus,
+        start: u64,
+        limit: u32,
+    ) -> Vec<Settlement> {
+        let mut out = Vec::new(&env);
+        let count = storage::get_settlement_count(&env);
+        let mut id = if start == 0 { 1 } else { start };
+        while id <= count && (out.len() as u32) < limit {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.anchor == anchor && settlement.status == status {
                     out.push_back(settlement);
                 }
             }
@@ -1120,6 +1241,25 @@ impl AnchornetContract {
         total
     }
 
+    /// Returns the total number of settlements ever opened by `anchor`,
+    /// scanning the full settlement history (O(n) cost, same as
+    /// [`settlement_count_by_status`](Self::settlement_count_by_status)).
+    /// Returns 0 for an anchor that has never opened a settlement.
+    pub fn anchor_settlement_count(env: Env, anchor: Address) -> u64 {
+        let count = storage::get_settlement_count(&env);
+        let mut total: u64 = 0;
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.anchor == anchor {
+                    total += 1;
+                }
+            }
+            id += 1;
+        }
+        total
+    }
+
     /// Returns the sum of `amount` across every settlement currently in
     /// `status`, scanning the full settlement history. Useful alongside
     /// [`settlement_count_by_status`](Self::settlement_count_by_status) for
@@ -1131,6 +1271,41 @@ impl AnchornetContract {
         while id <= count {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.status == status {
+                    total = total
+                        .checked_add(settlement.amount)
+                        .ok_or(Error::Overflow)?;
+                }
+            }
+            id = id.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        Ok(total)
+    }
+
+    /// Returns the sum of `amount` across every settlement that is currently
+    /// [`SettlementStatus::Pending`] for `asset`, i.e. the total liquidity
+    /// currently reserved in open settlements for that asset. Scans the full
+    /// settlement history via
+    /// [`storage::get_settlement_count`](crate::storage::get_settlement_count) /
+    /// [`storage::get_settlement`](crate::storage::get_settlement), so its cost
+    /// is O(n) in the total number of settlements ever opened — the same cost
+    /// class as [`settlement_count_by_status`](Self::settlement_count_by_status)
+    /// and [`total_settled_amount`](Self::total_settled_amount).
+    ///
+    /// Together with [`total_liquidity`](Self::total_liquidity), this enables
+    /// anchors and auditors to reconcile the pool's reported available total
+    /// against outstanding settlement exposure:
+    /// `total_liquidity(asset) + reserved_liquidity(asset)` equals the asset's
+    /// ever-provided liquidity minus amounts already released via executed,
+    /// cancelled, or expired settlements.
+    ///
+    /// Returns `0` when no settlements are pending for the given asset.
+    pub fn reserved_liquidity(env: Env, asset: Symbol) -> Result<i128, Error> {
+        let count = storage::get_settlement_count(&env);
+        let mut total: i128 = 0;
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.asset == asset && settlement.status == SettlementStatus::Pending {
                     total = total
                         .checked_add(settlement.amount)
                         .ok_or(Error::Overflow)?;
@@ -1253,6 +1428,28 @@ impl AnchornetContract {
 
         events::liquidity_withdrawn(env, provider, asset, amount);
         Ok(())
+    }
+}
+
+impl<'a> AnchornetContractClient<'a> {
+    /// Convenience client alias matching the issue terminology. It delegates to
+    /// the exported `is_max_settlement_amt_configured` contract function, whose
+    /// shorter on-chain symbol is required by Soroban's 32-byte function-name
+    /// limit.
+    pub fn is_max_settlement_amount_configured(&self, asset: &Symbol) -> bool {
+        self.is_max_settlement_amt_configured(asset)
+    }
+
+    /// Backward-compatible Rust client alias for the shorter
+    /// `list_settlements_by_anchor_asset` on-chain export.
+    pub fn list_settlements_by_anchor_and_asset(
+        &self,
+        anchor: &Address,
+        asset: &Symbol,
+        start: &u64,
+        limit: &u32,
+    ) -> Vec<Settlement> {
+        self.list_settlements_by_anchor_asset(anchor, asset, start, limit)
     }
 }
 
