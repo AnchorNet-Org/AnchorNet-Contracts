@@ -5142,6 +5142,159 @@ proptest! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// reserved_liquidity – per-asset pending settlement reservation queries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reserved_liquidity_sums_pending_for_asset() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Three pending settlements: 100 + 200 + 300 = 600
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &200);
+    client.open_settlement(&anchor, &asset, &300);
+
+    assert_eq!(client.reserved_liquidity(&asset), 600);
+}
+
+#[test]
+fn test_reserved_liquidity_excludes_other_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+
+    // USDC pending: 100 + 300 = 400
+    client.open_settlement(&anchor, &usdc, &100);
+    client.open_settlement(&anchor, &usdc, &300);
+
+    // EURC pending: 500
+    client.open_settlement(&anchor, &eurc, &500);
+
+    // reserved_liquidity for USDC must be 400, not 900
+    assert_eq!(client.reserved_liquidity(&usdc), 400);
+    // reserved_liquidity for EURC must be 500
+    assert_eq!(client.reserved_liquidity(&eurc), 500);
+}
+
+#[test]
+fn test_reserved_liquidity_excludes_non_pending_statuses() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    client.set_settlement_expiry_ledgers(&10);
+
+    // Pending – should count
+    let pending = client.open_settlement(&anchor, &asset, &100);
+
+    // Executed – should NOT count
+    let executed = client.open_settlement(&anchor, &asset, &200);
+    client.execute_settlement(&executed);
+
+    // Cancelled – should NOT count
+    let cancelled = client.open_settlement(&anchor, &asset, &300);
+    client.cancel_settlement(&cancelled);
+
+    // Expired – should NOT count
+    let expired = client.open_settlement(&anchor, &asset, &400);
+    env.ledger().set_sequence_number(15);
+    client.cancel_expired_settlement(&expired);
+
+    // Only the first (pending) settlement of 100 should be counted
+    assert_eq!(client.reserved_liquidity(&asset), 100);
+}
+
+#[test]
+fn test_reserved_liquidity_zero_when_no_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // No settlements opened at all
+    assert_eq!(client.reserved_liquidity(&asset), 0);
+
+    // Open, then execute all settlements – none pending
+    let id = client.open_settlement(&anchor, &asset, &400);
+    client.execute_settlement(&id);
+
+    assert_eq!(client.reserved_liquidity(&asset), 0);
+
+    // Also zero for an asset that never had any settlements
+    let other = symbol_short!("EURC");
+    assert_eq!(client.reserved_liquidity(&other), 0);
+}
+
+#[test]
+fn test_reserved_liquidity_mixed_assets_and_statuses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee(&50);
+    client.set_settlement_expiry_ledgers(&10);
+
+    // Fund both assets
+    client.provide_liquidity(&a1, &usdc, &10_000);
+    client.provide_liquidity(&a1, &eurc, &10_000);
+    client.provide_liquidity(&a2, &usdc, &10_000);
+    client.provide_liquidity(&a2, &eurc, &10_000);
+
+    // USDC pending: 100 (a1) + 300 (a2) = 400
+    client.open_settlement(&a1, &usdc, &100);
+    client.open_settlement(&a2, &usdc, &300);
+
+    // EURC pending: 200 (a1) = 200
+    client.open_settlement(&a1, &eurc, &200);
+
+    // USDC executed (not pending): 500 (a1)
+    let usdc_exec = client.open_settlement(&a1, &usdc, &500);
+    client.execute_settlement(&usdc_exec);
+
+    // EURC cancelled (not pending): 400 (a2)
+    let eurc_cancel = client.open_settlement(&a2, &eurc, &400);
+    client.cancel_settlement(&eurc_cancel);
+
+    // EURC expired (not pending): 150 (a1)
+    let eurc_expire = client.open_settlement(&a1, &eurc, &150);
+    env.ledger().set_sequence_number(20);
+    client.cancel_expired_settlement(&eurc_expire);
+
+    assert_eq!(client.reserved_liquidity(&usdc), 400);
+    assert_eq!(client.reserved_liquidity(&eurc), 200);
+}
+
+#[test]
+fn test_reserved_liquidity_returns_zero_for_asset_with_only_non_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open and immediately execute
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&id1);
+
+    // Open and cancel
+    let id2 = client.open_settlement(&anchor, &asset, &200);
+    client.cancel_settlement(&id2);
+
+    // No settlements are currently pending
+    assert_eq!(client.reserved_liquidity(&asset), 0);
+}
+
 // --- hello (smoke test that setup still works after all new tests) ---
 
 #[test]

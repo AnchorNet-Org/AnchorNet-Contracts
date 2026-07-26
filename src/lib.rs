@@ -1180,6 +1180,41 @@ impl AnchornetContract {
         }
         Ok(total)
     }
+
+    /// Returns the sum of `amount` across every settlement that is currently
+    /// [`SettlementStatus::Pending`] for `asset`, i.e. the total liquidity
+    /// currently reserved in open settlements for that asset. Scans the full
+    /// settlement history via
+    /// [`storage::get_settlement_count`](crate::storage::get_settlement_count) /
+    /// [`storage::get_settlement`](crate::storage::get_settlement), so its cost
+    /// is O(n) in the total number of settlements ever opened — the same cost
+    /// class as [`settlement_count_by_status`](Self::settlement_count_by_status)
+    /// and [`total_settled_amount`](Self::total_settled_amount).
+    ///
+    /// Together with [`total_liquidity`](Self::total_liquidity), this enables
+    /// anchors and auditors to reconcile the pool's reported available total
+    /// against outstanding settlement exposure:
+    /// `total_liquidity(asset) + reserved_liquidity(asset)` equals the asset's
+    /// ever-provided liquidity minus amounts already released via executed,
+    /// cancelled, or expired settlements.
+    ///
+    /// Returns `0` when no settlements are pending for the given asset.
+    pub fn reserved_liquidity(env: Env, asset: Symbol) -> Result<i128, Error> {
+        let count = storage::get_settlement_count(&env);
+        let mut total: i128 = 0;
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.asset == asset && settlement.status == SettlementStatus::Pending {
+                    total = total
+                        .checked_add(settlement.amount)
+                        .ok_or(Error::Overflow)?;
+                }
+            }
+            id = id.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        Ok(total)
+    }
 }
 
 impl AnchornetContract {
