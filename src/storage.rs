@@ -393,6 +393,15 @@ pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
+/// Returns `true` if a minimum liquidity floor has ever been configured for
+/// `asset`, including an explicit zero floor that intentionally disables the
+/// withdrawal check.
+pub fn has_min_liquidity(env: &Env, asset: &Symbol) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::MinLiquidity(asset.clone()))
+}
+
 /// Persists the minimum liquidity floor for `asset`.
 pub fn set_min_liquidity(env: &Env, asset: &Symbol, floor: i128) {
     let key = DataKey::MinLiquidity(asset.clone());
