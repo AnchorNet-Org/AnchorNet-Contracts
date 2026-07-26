@@ -1454,13 +1454,13 @@ fn test_list_settlements_by_anchor_asset_empty_for_unknown() {
 
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&stranger, &asset, &1, &10)
+            .list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10)
             .len(),
         0
     );
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&anchor, &other_asset, &1, &10)
+            .list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10)
             .len(),
         0
     );
@@ -2931,10 +2931,6 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    // After the operator role is cleared, the former operator must be
-    // rejected by the admin-or-operator gated entrypoints. The contract
-    // detects the missing operator and returns `NotAuthorized` before any
-    // host auth check.
     let err = client.try_pause(&operator).err().unwrap().unwrap();
     assert_eq!(err, Error::NotAuthorized);
     let err = client.try_unpause(&operator).err().unwrap().unwrap();
@@ -3766,8 +3762,27 @@ fn test_max_settlement_amount_disabled_by_default() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
     assert_eq!(client.max_settlement_amount(&asset), 0);
+    assert!(!client.is_max_settlement_amount_configured(&asset));
 
     // With no cap configured, a large settlement is unaffected.
+    client.open_settlement(&anchor, &asset, &1_000);
+}
+
+#[test]
+fn test_max_settlement_amount_explicit_zero_is_configured_but_disabled() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    assert_eq!(client.max_settlement_amount(&asset), 0);
+    assert!(!client.is_max_settlement_amount_configured(&asset));
+
+    client.set_max_settlement_amount(&asset, &0);
+
+    assert_eq!(client.max_settlement_amount(&asset), 0);
+    assert!(client.is_max_settlement_amount_configured(&asset));
+
+    // An explicit zero remains cap-disabling, matching the pre-existing
+    // open_settlement enforcement rule (`cap > 0 && amount > cap`).
     client.open_settlement(&anchor, &asset, &1_000);
 }
 
@@ -3776,9 +3791,12 @@ fn test_set_max_settlement_amount_updates_value() {
     let env = Env::default();
     let (client, _admin, _anchor, asset) = funded(&env, 1_000);
 
+    assert!(!client.is_max_settlement_amount_configured(&asset));
+
     client.set_max_settlement_amount(&asset, &500);
 
     assert_eq!(client.max_settlement_amount(&asset), 500);
+    assert!(client.is_max_settlement_amount_configured(&asset));
 }
 
 #[test]
@@ -5318,7 +5336,7 @@ fn test_list_settlements_by_anchor_asset_start_past_end_returns_empty() {
 
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&anchor, &asset, &3, &10)
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10)
             .len(),
         0
     );
@@ -5338,13 +5356,13 @@ fn test_list_settlements_by_anchor_asset_limit_zero_returns_empty() {
 
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&anchor, &asset, &1, &0)
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0)
             .len(),
         0
     );
     assert_eq!(
         client
-            .list_settlements_by_anchor_asset(&anchor, &asset, &0, &0)
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0)
             .len(),
         0
     );
@@ -6109,6 +6127,19 @@ fn test_min_liquidity_read_on_unconfigured_asset_is_safe() {
     // Never configured: the `.has` guard must skip `extend_ttl` (which would
     // panic on an absent key) and the getter must still return the default.
     assert_eq!(client.min_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_max_settlement_amount_configured_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // Never configured: the configuration-status view must return `false`
+    // without attempting to extend an absent MaxSettlementAmount entry.
+    assert!(!client.is_max_settlement_amount_configured(&asset));
 }
 
 #[test]

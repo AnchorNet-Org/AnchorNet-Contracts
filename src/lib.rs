@@ -575,6 +575,17 @@ impl AnchornetContract {
         storage::get_max_settlement_amount(&env, &asset)
     }
 
+    /// Returns `true` if [`set_max_settlement_amount`](Self::set_max_settlement_amount)
+    /// has ever been called for `asset`, including with an explicit zero that
+    /// disables the cap. This view disambiguates an unset cap from an
+    /// admin-configured zero without changing settlement enforcement.
+    ///
+    /// The on-chain export uses `amt` rather than `amount` to stay within
+    /// Soroban's 32-byte contract-function symbol limit.
+    pub fn is_max_settlement_amt_configured(env: Env, asset: Symbol) -> bool {
+        storage::has_max_settlement_amount(&env, &asset)
+    }
+
     /// Withdraws `amount` of liquidity in `asset` back to `provider`.
     ///
     /// Requires authorization from `provider` and fails with
@@ -1099,6 +1110,10 @@ impl AnchornetContract {
     /// Returns up to `limit` settlements matching both `anchor` and `asset`,
     /// starting at id `start` (inclusive). Ids are assigned sequentially from 1;
     /// missing or non-matching ids are skipped without counting toward `limit`.
+    ///
+    /// The on-chain export omits `and` to stay within Soroban's 32-byte
+    /// contract-function symbol limit; the generated Rust client keeps the old
+    /// longer spelling as a convenience alias below.
     pub fn list_settlements_by_anchor_asset(
         env: Env,
         anchor: Address,
@@ -1413,6 +1428,28 @@ impl AnchornetContract {
 
         events::liquidity_withdrawn(env, provider, asset, amount);
         Ok(())
+    }
+}
+
+impl<'a> AnchornetContractClient<'a> {
+    /// Convenience client alias matching the issue terminology. It delegates to
+    /// the exported `is_max_settlement_amt_configured` contract function, whose
+    /// shorter on-chain symbol is required by Soroban's 32-byte function-name
+    /// limit.
+    pub fn is_max_settlement_amount_configured(&self, asset: &Symbol) -> bool {
+        self.is_max_settlement_amt_configured(asset)
+    }
+
+    /// Backward-compatible Rust client alias for the shorter
+    /// `list_settlements_by_anchor_asset` on-chain export.
+    pub fn list_settlements_by_anchor_and_asset(
+        &self,
+        anchor: &Address,
+        asset: &Symbol,
+        start: &u64,
+        limit: &u32,
+    ) -> Vec<Settlement> {
+        self.list_settlements_by_anchor_asset(anchor, asset, start, limit)
     }
 }
 
