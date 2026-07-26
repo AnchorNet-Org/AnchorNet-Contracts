@@ -545,6 +545,103 @@ fn test_open_settlement_rejects_unregistered() {
     assert_eq!(err, Error::AnchorNotRegistered);
 }
 
+// ---------------------------------------------------------------------------
+// Error surface on a never-funded asset – issue #152
+//
+// The three tests above all probe a *funded* asset. A never-funded one is a
+// different state: `storage::get_pool` materializes `Pool::empty(asset)` for a
+// missing entry, so `open_settlement` reaches `pool.total < amount` and answers
+// `InsufficientLiquidity`, while `pool()` checks entry existence and answers
+// `PoolNotFound` for the very same asset. The tests below pin that divergence
+// down, plus the validation order it depends on: `open_settlement` returns
+// `InvalidAmount` for a non-positive amount and `AnchorNotRegistered` for an
+// unknown anchor *before* it ever reads the pool, so a probe that tripped
+// either of those checks would report success for the wrong reason.
+// ---------------------------------------------------------------------------
+
+/// A settlement opened against an asset that never received liquidity fails
+/// with [`Error::InsufficientLiquidity`], not [`Error::PoolNotFound`].
+///
+/// `amount = 1` is deliberate: it is the smallest value that clears the
+/// `amount <= 0` guard and actually reaches the liquidity check. Probing with
+/// `0` would return `InvalidAmount` and pass this test's intent by accident,
+/// even under an implementation that changed the never-funded semantics.
+#[test]
+fn test_open_settlement_never_funded_asset_returns_insufficient_liquidity() {
+    let env = Env::default();
+    // Funds USDC only, so the anchor is registered but `never_funded` has no
+    // pool entry at all — the state under test.
+    let (client, _admin, anchor, funded_asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+    assert_ne!(never_funded, funded_asset);
+
+    let err = client
+        .try_open_settlement(&anchor, &never_funded, &1)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::InsufficientLiquidity);
+}
+
+/// The companion view of the same state: `pool()` answers
+/// [`Error::PoolNotFound`] for the asset that `open_settlement` rejects with
+/// `InsufficientLiquidity`. The divergence is intentional, and a refactor that
+/// collapsed both entrypoints onto one error variant would break one of these
+/// two tests.
+#[test]
+fn test_pool_getter_never_funded_asset_returns_pool_not_found() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client.try_pool(&never_funded).err().unwrap().unwrap();
+
+    assert_eq!(err, Error::PoolNotFound);
+}
+
+/// Boundary above the liquidity check: on the *same* never-funded asset,
+/// `amount = 0` is rejected as [`Error::InvalidAmount`] before the pool is
+/// read. This is what makes the `amount = 1` choice above meaningful — if a
+/// refactor moved the liquidity check ahead of the amount guard, this test
+/// fails and exposes that the main test would then be passing for a different
+/// reason than the one it documents.
+#[test]
+fn test_open_settlement_never_funded_zero_amount_returns_invalid_amount() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client
+        .try_open_settlement(&anchor, &never_funded, &0)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::InvalidAmount);
+}
+
+/// Boundary on the other side: the anchor registration check also precedes the
+/// pool read, so an unknown anchor on a never-funded asset reports
+/// [`Error::AnchorNotRegistered`] rather than `InsufficientLiquidity`. Together
+/// with the zero-amount case this brackets the liquidity branch, pinning the
+/// registered-anchor + positive-amount preconditions the main test relies on.
+#[test]
+fn test_open_settlement_never_funded_unregistered_anchor_reports_registration() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+    let stranger = Address::generate(&env);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client
+        .try_open_settlement(&stranger, &never_funded, &1)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::AnchorNotRegistered);
+}
+
 #[test]
 fn test_execute_settlement_accrues_fee() {
     let env = Env::default();
