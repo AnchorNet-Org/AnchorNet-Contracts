@@ -361,6 +361,14 @@ pub fn set_fee_waiver(env: &Env, anchor: &Address, waived: bool) {
     extend(env, &key);
 }
 
+/// Returns `true` if the settlement expiry window has been explicitly
+/// configured, including an explicit zero value that disables expiry.
+pub fn has_settlement_expiry_ledgers(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .has(&DataKey::SettlementExpiryLedgers)
+}
+
 /// Reads the settlement expiry window in ledgers (zero if never configured,
 /// meaning settlements never expire).
 pub fn get_settlement_expiry_ledgers(env: &Env) -> u32 {
@@ -391,6 +399,15 @@ pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
         extend(env, &key);
     }
     env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Returns `true` if a minimum liquidity floor has ever been configured for
+/// `asset`, including an explicit zero floor that intentionally disables the
+/// withdrawal check.
+pub fn has_min_liquidity(env: &Env, asset: &Symbol) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::MinLiquidity(asset.clone()))
 }
 
 /// Persists the minimum liquidity floor for `asset`.
