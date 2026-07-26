@@ -67,6 +67,35 @@ fn fee_test_env() -> Env {
     })
 }
 
+/// Pins every `Error` variant to its documented numeric code (see
+/// `src/error.rs` and `docs/ERRORS.md`). Off-chain clients match on these
+/// codes directly, so a future PR that inserts a new variant in the middle
+/// of the enum instead of appending it would silently renumber every
+/// variant declared after it — this test fails immediately if that happens.
+#[test]
+fn test_error_discriminants_are_pinned() {
+    assert_eq!(Error::AlreadyInitialized as u32, 1);
+    assert_eq!(Error::NotInitialized as u32, 2);
+    assert_eq!(Error::NotAuthorized as u32, 3);
+    assert_eq!(Error::AnchorAlreadyRegistered as u32, 4);
+    assert_eq!(Error::AnchorNotRegistered as u32, 5);
+    assert_eq!(Error::InvalidAmount as u32, 6);
+    assert_eq!(Error::InsufficientLiquidity as u32, 7);
+    assert_eq!(Error::PoolNotFound as u32, 8);
+    assert_eq!(Error::Paused as u32, 9);
+    assert_eq!(Error::InvalidFee as u32, 10);
+    assert_eq!(Error::SettlementNotFound as u32, 11);
+    assert_eq!(Error::InvalidSettlementState as u32, 12);
+    assert_eq!(Error::NoFeesToCollect as u32, 13);
+    assert_eq!(Error::NoPendingAdmin as u32, 14);
+    assert_eq!(Error::NotPendingAdmin as u32, 15);
+    assert_eq!(Error::SettlementNotExpired as u32, 16);
+    assert_eq!(Error::BelowMinLiquidity as u32, 17);
+    assert_eq!(Error::NoOperator as u32, 18);
+    assert_eq!(Error::AboveMaxSettlementAmount as u32, 19);
+    assert_eq!(Error::DuplicateAssetInBatch as u32, 20);
+}
+
 #[test]
 fn test_initialize_sets_admin() {
     let env = Env::default();
