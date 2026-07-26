@@ -341,6 +341,43 @@ fn test_unknown_balance_is_zero() {
 }
 
 #[test]
+fn test_provider_share_bps_single_provider() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    assert_eq!(client.provider_share_bps(&anchor, &asset), 10_000);
+}
+
+#[test]
+fn test_provider_share_bps_multiple_providers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.provide_liquidity(&a1, &asset, &600);
+    client.provide_liquidity(&a2, &asset, &400);
+    assert_eq!(client.provider_share_bps(&a1, &asset), 6000);
+    assert_eq!(client.provider_share_bps(&a2, &asset), 4000);
+}
+
+#[test]
+fn test_provider_share_bps_zero_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    let anchor = Address::generate(&env);
+    // no liquidity provided
+    assert_eq!(client.provider_share_bps(&anchor, &asset), 0);
+}
+
+#[test]
 fn test_set_admin_transfers_control() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1515,8 +1552,18 @@ fn test_list_settlements_by_anch_asset_empty_for_unknown() {
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(client.list_settlements_by_anch_asset(&stranger, &asset, &1, &10).len(), 0);
-    assert_eq!(client.list_settlements_by_anch_asset(&anchor, &other_asset, &1, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10)
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -5604,7 +5651,9 @@ fn test_list_settlements_by_anch_asset_start_past_end_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anch_asset(&anchor, &asset, &3, &10).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10)
+            .len(),
         0
     );
     assert_eq!(
@@ -5622,11 +5671,15 @@ fn test_list_settlements_by_anch_asset_limit_zero_returns_empty() {
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anch_asset(&anchor, &asset, &1, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0)
+            .len(),
         0
     );
     assert_eq!(
-        client.list_settlements_by_anch_asset(&anchor, &asset, &0, &0).len(),
+        client
+            .list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0)
+            .len(),
         0
     );
 }
