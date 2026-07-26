@@ -34,6 +34,44 @@ macro_rules! assert_operator_rejected {
     }};
 }
 
+/// Asserts that `caller` is turned away by a *contract-level*
+/// [`Error::NotAuthorized`] rather than a host authorization failure.
+///
+/// [`assert_operator_rejected`] covers strict admin-only entrypoints, where
+/// `require_admin` asks for the admin's signature and the host aborts the
+/// invocation. The shared-authority entrypoints (`pause`, `unpause`,
+/// `extend_instance_ttl`) instead run `require_admin_or_operator`, which
+/// rejects an address that is neither admin nor the appointed operator and
+/// returns `NotAuthorized` *before* ever reaching `caller.require_auth()`.
+/// That is a contract error, so it must be matched as one.
+macro_rules! assert_caller_unauthorized {
+    ($env:ident, $client:ident, $caller:ident, $fn_name:literal, $args:expr, $call:expr) => {{
+        $env.set_auths(&[MockAuth {
+            address: &$caller,
+            invoke: &MockAuthInvoke {
+                contract: &$client.address,
+                fn_name: $fn_name,
+                args: $args.into_val(&$env),
+                sub_invokes: &[],
+            },
+        }
+        .into()]);
+
+        let failure = $call
+            .err()
+            .expect(concat!($fn_name, " unexpectedly accepted the caller"));
+        assert_eq!(
+            failure.expect(concat!(
+                $fn_name,
+                " aborted at the host instead of returning NotAuthorized"
+            )),
+            Error::NotAuthorized,
+            "{} rejected the caller with an unexpected error",
+            $fn_name
+        );
+    }};
+}
+
 fn setup(env: &Env) -> (AnchornetContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, AnchornetContract);
     let client = AnchornetContractClient::new(env, &contract_id);
@@ -65,6 +103,35 @@ fn fee_test_env() -> Env {
     Env::new_with_config(EnvTestConfig {
         capture_snapshot_at_drop: false,
     })
+}
+
+/// Pins every `Error` variant to its documented numeric code (see
+/// `src/error.rs` and `docs/ERRORS.md`). Off-chain clients match on these
+/// codes directly, so a future PR that inserts a new variant in the middle
+/// of the enum instead of appending it would silently renumber every
+/// variant declared after it — this test fails immediately if that happens.
+#[test]
+fn test_error_discriminants_are_pinned() {
+    assert_eq!(Error::AlreadyInitialized as u32, 1);
+    assert_eq!(Error::NotInitialized as u32, 2);
+    assert_eq!(Error::NotAuthorized as u32, 3);
+    assert_eq!(Error::AnchorAlreadyRegistered as u32, 4);
+    assert_eq!(Error::AnchorNotRegistered as u32, 5);
+    assert_eq!(Error::InvalidAmount as u32, 6);
+    assert_eq!(Error::InsufficientLiquidity as u32, 7);
+    assert_eq!(Error::PoolNotFound as u32, 8);
+    assert_eq!(Error::Paused as u32, 9);
+    assert_eq!(Error::InvalidFee as u32, 10);
+    assert_eq!(Error::SettlementNotFound as u32, 11);
+    assert_eq!(Error::InvalidSettlementState as u32, 12);
+    assert_eq!(Error::NoFeesToCollect as u32, 13);
+    assert_eq!(Error::NoPendingAdmin as u32, 14);
+    assert_eq!(Error::NotPendingAdmin as u32, 15);
+    assert_eq!(Error::SettlementNotExpired as u32, 16);
+    assert_eq!(Error::BelowMinLiquidity as u32, 17);
+    assert_eq!(Error::NoOperator as u32, 18);
+    assert_eq!(Error::AboveMaxSettlementAmount as u32, 19);
+    assert_eq!(Error::DuplicateAssetInBatch as u32, 20);
 }
 
 #[test]
@@ -545,6 +612,103 @@ fn test_open_settlement_rejects_unregistered() {
     assert_eq!(err, Error::AnchorNotRegistered);
 }
 
+// ---------------------------------------------------------------------------
+// Error surface on a never-funded asset – issue #152
+//
+// The three tests above all probe a *funded* asset. A never-funded one is a
+// different state: `storage::get_pool` materializes `Pool::empty(asset)` for a
+// missing entry, so `open_settlement` reaches `pool.total < amount` and answers
+// `InsufficientLiquidity`, while `pool()` checks entry existence and answers
+// `PoolNotFound` for the very same asset. The tests below pin that divergence
+// down, plus the validation order it depends on: `open_settlement` returns
+// `InvalidAmount` for a non-positive amount and `AnchorNotRegistered` for an
+// unknown anchor *before* it ever reads the pool, so a probe that tripped
+// either of those checks would report success for the wrong reason.
+// ---------------------------------------------------------------------------
+
+/// A settlement opened against an asset that never received liquidity fails
+/// with [`Error::InsufficientLiquidity`], not [`Error::PoolNotFound`].
+///
+/// `amount = 1` is deliberate: it is the smallest value that clears the
+/// `amount <= 0` guard and actually reaches the liquidity check. Probing with
+/// `0` would return `InvalidAmount` and pass this test's intent by accident,
+/// even under an implementation that changed the never-funded semantics.
+#[test]
+fn test_open_settlement_never_funded_asset_returns_insufficient_liquidity() {
+    let env = Env::default();
+    // Funds USDC only, so the anchor is registered but `never_funded` has no
+    // pool entry at all — the state under test.
+    let (client, _admin, anchor, funded_asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+    assert_ne!(never_funded, funded_asset);
+
+    let err = client
+        .try_open_settlement(&anchor, &never_funded, &1)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::InsufficientLiquidity);
+}
+
+/// The companion view of the same state: `pool()` answers
+/// [`Error::PoolNotFound`] for the asset that `open_settlement` rejects with
+/// `InsufficientLiquidity`. The divergence is intentional, and a refactor that
+/// collapsed both entrypoints onto one error variant would break one of these
+/// two tests.
+#[test]
+fn test_pool_getter_never_funded_asset_returns_pool_not_found() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client.try_pool(&never_funded).err().unwrap().unwrap();
+
+    assert_eq!(err, Error::PoolNotFound);
+}
+
+/// Boundary above the liquidity check: on the *same* never-funded asset,
+/// `amount = 0` is rejected as [`Error::InvalidAmount`] before the pool is
+/// read. This is what makes the `amount = 1` choice above meaningful — if a
+/// refactor moved the liquidity check ahead of the amount guard, this test
+/// fails and exposes that the main test would then be passing for a different
+/// reason than the one it documents.
+#[test]
+fn test_open_settlement_never_funded_zero_amount_returns_invalid_amount() {
+    let env = Env::default();
+    let (client, _admin, anchor, _asset) = funded(&env, 1_000);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client
+        .try_open_settlement(&anchor, &never_funded, &0)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::InvalidAmount);
+}
+
+/// Boundary on the other side: the anchor registration check also precedes the
+/// pool read, so an unknown anchor on a never-funded asset reports
+/// [`Error::AnchorNotRegistered`] rather than `InsufficientLiquidity`. Together
+/// with the zero-amount case this brackets the liquidity branch, pinning the
+/// registered-anchor + positive-amount preconditions the main test relies on.
+#[test]
+fn test_open_settlement_never_funded_unregistered_anchor_reports_registration() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+    let stranger = Address::generate(&env);
+    let never_funded = symbol_short!("NOFUND");
+
+    let err = client
+        .try_open_settlement(&stranger, &never_funded, &1)
+        .err()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(err, Error::AnchorNotRegistered);
+}
+
 #[test]
 fn test_execute_settlement_accrues_fee() {
     let env = Env::default();
@@ -746,6 +910,67 @@ fn test_small_settlement_executes_without_accruing_truncated_fee() {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Fuzzes the three-axis fee-configuration interaction space: a global fee
+    /// (`set_fee`), an optional per-asset override (`set_asset_fee` / clear),
+    /// and an optional per-anchor waiver (`set_fee_waiver`). Precedence is:
+    /// waiver > asset override > global rate. Every generated combination is
+    /// cross-checked against `quote_fee` and the settlement's own `fee` and
+    /// the accrued fee after `execute_settlement`.
+    #[test]
+    fn prop_fee_three_axis_interaction(
+        amount in fee_amount_strategy(),
+        global_bps in 0u32..=1_000,
+        override_bps in prop::option::of(0u32..=1_000),
+        waived in prop::bool::ANY,
+    ) {
+        let env = fee_test_env();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+        let anchor = Address::generate(&env);
+        let asset = symbol_short!("USDC");
+        client.initialize(&admin);
+        client.register_anchor(&anchor);
+        client.provide_liquidity(&anchor, &asset, &amount);
+        client.set_fee(&global_bps);
+        if let Some(bps) = override_bps {
+            client.set_asset_fee(&asset, &bps);
+        } else {
+            client.clear_asset_fee(&asset);
+        }
+        if waived {
+            client.set_fee_waiver(&anchor, &true);
+        } else {
+            client.set_fee_waiver(&anchor, &false);
+        }
+
+        let expected_bps = if waived {
+            0
+        } else if override_bps.is_some() {
+            override_bps.unwrap()
+        } else {
+            global_bps
+        };
+        let expected_fee = if amount > 0 {
+            client.quote_fee(&asset, &amount).unwrap_or(0)
+        } else {
+            0
+        };
+        let id = client.open_settlement(&anchor, &asset, &amount);
+        let settlement_fee = client.settlement(&id).fee;
+        if waived {
+            prop_assert_eq!(settlement_fee, 0);
+            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            client.execute_settlement(&id);
+            prop_assert_eq!(client.fees_accrued(&asset), 0);
+        } else {
+            prop_assert_eq!(settlement_fee, expected_fee);
+            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            let before = client.fees_accrued(&asset);
+            client.execute_settlement(&id);
+            prop_assert_eq!(client.fees_accrued(&asset) - before, expected_fee);
+        }
+    }
 
     #[test]
     fn prop_quote_fee_is_monotonic_and_bounded_with_global_fee(
@@ -1172,7 +1397,7 @@ fn test_list_settlements_by_asset_empty_for_unknown() {
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_filters_other() {
+fn test_list_settlements_by_anchor_asset_filters_other() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = setup(&env);
@@ -1193,44 +1418,53 @@ fn test_list_settlements_by_anchor_and_asset_filters_other() {
     let s3 = client.open_settlement(&a2, &usdc, &100);
     let s4 = client.open_settlement(&a1, &usdc, &100);
 
-    let a1_usdc = client.list_settlements_by_anchor_and_asset(&a1, &usdc, &1, &10);
+    let a1_usdc = client.list_settlements_by_anchor_asset(&a1, &usdc, &1, &10);
     assert_eq!(a1_usdc.len(), 2);
     assert_eq!(a1_usdc.get(0).unwrap().id, s1);
     assert_eq!(a1_usdc.get(1).unwrap().id, s4);
 
-    let a1_eurc = client.list_settlements_by_anchor_and_asset(&a1, &eurc, &1, &10);
+    let a1_eurc = client.list_settlements_by_anchor_asset(&a1, &eurc, &1, &10);
     assert_eq!(a1_eurc.len(), 1);
     assert_eq!(a1_eurc.get(0).unwrap().id, s2);
 
-    let a2_usdc = client.list_settlements_by_anchor_and_asset(&a2, &usdc, &1, &10);
+    let a2_usdc = client.list_settlements_by_anchor_asset(&a2, &usdc, &1, &10);
     assert_eq!(a2_usdc.len(), 1);
     assert_eq!(a2_usdc.get(0).unwrap().id, s3);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_respects_limit() {
+fn test_list_settlements_by_anchor_asset_respects_limit() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     for _ in 0..3 {
         client.open_settlement(&anchor, &asset, &100);
     }
 
-    let limited = client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &2);
+    let limited = client.list_settlements_by_anchor_asset(&anchor, &asset, &1, &2);
     assert_eq!(limited.len(), 2);
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_empty_for_unknown() {
+fn test_list_settlements_by_anchor_asset_empty_for_unknown() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     let stranger = Address::generate(&env);
     let other_asset = symbol_short!("EURC");
 
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&stranger, &asset, &1, &10).len(), 0);
-    assert_eq!(client.list_settlements_by_anchor_and_asset(&anchor, &other_asset, &1, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_asset(&stranger, &asset, &1, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_anchor_asset(&anchor, &other_asset, &1, &10)
+            .len(),
+        0
+    );
 }
-
 
 #[test]
 fn test_version() {
@@ -1369,6 +1603,128 @@ fn test_propose_and_accept_admin_transfers_control() {
     assert_eq!(err, Error::NoPendingAdmin);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: an outstanding admin proposal must not weaken the current
+// administrator (issue #130).
+//
+// `propose_admin` writes only the `PendingAdmin` entry, and `require_admin`
+// resolves authority live from `Admin` without ever consulting it, so the
+// outgoing admin keeps unrestricted authority until the candidate calls
+// `accept_admin`. Coupling the two would turn a transfer to an unreachable
+// candidate into a denial of service against the contract's own admin.
+//
+// The test above already covers the `admin()` getter across the transfer, but
+// reading the getter is not the same as exercising authority: it would stay
+// green even if a partial freeze rejected the outgoing admin's calls. This
+// test drives real admin-only entrypoints in all three phases instead.
+//
+// Authorization failures are asserted with `assert_operator_rejected!`, which
+// is generic over the address it presents despite its name: it installs a
+// single `MockAuth` for that address, so an entrypoint asking for a different
+// signature fails in the host rather than reaching contract logic.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_outgoing_admin_retains_authority_until_transfer_is_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let candidate = Address::generate(&env);
+    let interim = Address::generate(&env);
+    let anchor = Address::generate(&env);
+    let later_anchor = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.propose_admin(&candidate);
+    assert_eq!(client.pending_admin(), candidate);
+
+    // --- Phase 1: the outgoing admin is untouched by the pending proposal ---
+    // Driven through `try_*` so a regression reports which entrypoint started
+    // refusing the admin, rather than surfacing as an opaque host panic.
+    assert!(
+        client.try_set_fee(&100).is_ok(),
+        "the outgoing admin must still be able to set the fee",
+    );
+    assert_eq!(client.fee(), 100);
+    assert!(
+        client.try_register_anchor(&anchor).is_ok(),
+        "the outgoing admin must still be able to register anchors",
+    );
+    assert!(client.is_anchor(&anchor));
+
+    // Including the transfer machinery itself: the admin can still redirect
+    // the proposal, which is what makes an unresponsive candidate recoverable
+    // rather than fatal.
+    assert!(
+        client.try_propose_admin(&interim).is_ok(),
+        "the outgoing admin must still be able to propose a different candidate",
+    );
+    assert_eq!(client.pending_admin(), interim);
+    client.propose_admin(&candidate);
+    assert_eq!(
+        client.pending_admin(),
+        candidate,
+        "the admin must be able to redirect an outstanding proposal",
+    );
+    assert_eq!(client.admin(), admin, "authority has not moved yet");
+
+    // --- Phase 2: the candidate holds no authority before accepting ---
+    assert_operator_rejected!(
+        env,
+        client,
+        candidate,
+        "set_fee",
+        (25_u32,),
+        client.try_set_fee(&25)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        candidate,
+        "register_anchor",
+        (later_anchor.clone(),),
+        client.try_register_anchor(&later_anchor)
+    );
+    assert_operator_rejected!(
+        env,
+        client,
+        candidate,
+        "propose_admin",
+        (interim.clone(),),
+        client.try_propose_admin(&interim)
+    );
+
+    // None of the rejected calls left a trace.
+    assert_eq!(client.fee(), 100);
+    assert!(!client.is_anchor(&later_anchor));
+    assert_eq!(client.pending_admin(), candidate);
+
+    // --- Phase 3: acceptance flips authority in both directions ---
+    env.mock_all_auths();
+    client.accept_admin(&candidate);
+    assert_eq!(client.admin(), candidate);
+
+    client.set_fee(&250);
+    assert_eq!(client.fee(), 250);
+    client.register_anchor(&later_anchor);
+    assert!(client.is_anchor(&later_anchor));
+
+    // The former admin is now just another address.
+    assert_operator_rejected!(
+        env,
+        client,
+        admin,
+        "set_fee",
+        (25_u32,),
+        client.try_set_fee(&25)
+    );
+    assert_eq!(
+        client.fee(),
+        250,
+        "the former admin must not be able to change the fee after handover",
+    );
+}
+
 #[test]
 fn test_accept_admin_without_proposal_fails() {
     let env = Env::default();
@@ -1414,6 +1770,105 @@ fn test_propose_admin_overwrites_prior_proposal() {
     assert_eq!(client.pending_admin(), second);
     let err = client.try_accept_admin(&first).err().unwrap().unwrap();
     assert_eq!(err, Error::NotPendingAdmin);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: a second `propose_admin` supersedes the first candidate
+// (issue #131).
+//
+// `propose_admin` writes `PendingAdmin` unconditionally: there is no
+// `has_pending_admin` guard and no dedicated "superseded" event, so a second
+// proposal silently replaces the first. That last-write-wins shape, with no
+// queue, is intentional — it is how an administrator corrects a mistyped
+// candidate, and requiring an explicit cancel first would leave a bad
+// proposal stuck. It should not be "fixed" into a rejection.
+//
+// `test_propose_admin_overwrites_prior_proposal` above already pins the state
+// half: `pending_admin` reports the second candidate and the first is turned
+// away with `NotPendingAdmin`. What it leaves uncovered is that the supersede
+// hands off a still-working transfer, and that each proposal announced itself
+// on the event stream. An implementation that coalesced the two calls into a
+// single event, or that left the second candidate unable to accept, passes
+// the state-only assertions and fails here.
+//
+// Events are captured after each call because `events().all()` reflects only
+// the most recent top-level invocation (see the note in
+// `test_set_admin_emits_admin_changed_event`). Reading it once after both
+// proposals would return the second event alone and prove nothing about the
+// first.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_second_propose_admin_supersedes_first_and_emits_both_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    // The first proposal announces `first` on the event stream.
+    client.propose_admin(&first);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("propose"),).into_val(&env),
+                first.clone().into_val(&env),
+            ),
+        ],
+        "the first propose_admin must emit admin_proposed for the first candidate"
+    );
+    assert_eq!(client.pending_admin(), first);
+
+    // The second proposal announces `second` with its own event, rather than
+    // being coalesced into the first or suppressed as a redundant proposal.
+    client.propose_admin(&second);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("propose"),).into_val(&env),
+                second.clone().into_val(&env),
+            ),
+        ],
+        "the second propose_admin must emit its own admin_proposed event"
+    );
+
+    // The pending entry now names the second candidate alone.
+    assert_eq!(client.pending_admin(), second);
+
+    // The superseded candidate is left with no dangling authorized path.
+    // `accept_admin` resolves the pending entry before `require_auth`, so this
+    // is a contract-level rejection and not an authorization failure.
+    let err = client.try_accept_admin(&first).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotPendingAdmin);
+
+    // Authority has not moved yet: superseding a proposal is not a transfer.
+    assert_eq!(client.admin(), admin);
+
+    // The proposal is still live for the second candidate and completes.
+    client.accept_admin(&second);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("admin"), symbol_short!("accept")).into_val(&env),
+                second.clone().into_val(&env),
+            ),
+        ],
+        "accept_admin must emit admin_changed via the proposal path"
+    );
+    assert_eq!(client.admin(), second);
+    let err = client.try_pending_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoPendingAdmin);
 }
 
 #[test]
@@ -1604,6 +2059,143 @@ fn test_fee_waiver_unset_by_default() {
     assert!(!client.is_fee_waived(&anchor));
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: flipping a fee waiver never rewrites a settlement that is
+// already open (issue #144).
+//
+// `open_settlement` snapshots the fee once, reading `is_fee_waived` at open
+// time (lib.rs, the `let fee = if storage::is_fee_waived(..)` branch), and
+// `execute_settlement` accrues `settlement.fee` directly — it never re-reads
+// the waiver. The tests below toggle the waiver in both directions while a
+// settlement sits Pending and pin the invariant on four distinct views of
+// the same state, so a future implementation that recomputes at execute
+// time fails here rather than silently mispricing:
+//
+//   1. `Settlement.fee` on the stored record (immutability post-open).
+//   2. The `fees_accrued` delta produced by `execute_settlement`.
+//   3. Record and delta agreeing numerically — a `fees_accrued`-only test
+//      would pass against a broken impl that recomputed to the same number.
+//   4. `waived_fee_volume`, which the waived branch of `open_settlement`
+//      also writes: the forgone-revenue counter must be decided at open
+//      time too, and must not move when the waiver later changes.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_fee_waiver_granted_after_open_does_not_reduce_accrued_fee() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1%
+
+    assert!(
+        !client.is_fee_waived(&anchor),
+        "precondition: anchor unwaived"
+    );
+
+    // Opened while unwaived: the record freezes a non-zero fee, and the
+    // waived-volume counter is untouched because the waived branch never ran.
+    let id = client.open_settlement(&anchor, &asset, &400_000);
+    let frozen_fee = client.settlement(&id).fee;
+    assert_eq!(
+        frozen_fee, 4_000,
+        "unwaived anchor must snapshot the 1% fee"
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+
+    let accrued_before = client.fees_accrued(&asset);
+
+    // The flip mid-flight, while the settlement is still Pending.
+    client.set_fee_waiver(&anchor, &true);
+    assert!(client.is_fee_waived(&anchor));
+
+    // 1. The record is unchanged by the flip.
+    assert_eq!(
+        client.settlement(&id).fee,
+        frozen_fee,
+        "Settlement.fee must not change retroactively when the waiver is granted",
+    );
+    // 4. The waiver came too late to count as forgone revenue.
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        0,
+        "a waiver granted after open must not retroactively book forgone revenue",
+    );
+
+    client.execute_settlement(&id);
+
+    // 2. Accrual used the frozen fee, not the now-waived recomputation.
+    let delta = client.fees_accrued(&asset) - accrued_before;
+    assert_eq!(
+        delta, frozen_fee,
+        "fees_accrued must grow by the snapshotted fee, not by 0",
+    );
+    // 3. Both views report the same number.
+    assert_eq!(
+        client.settlement(&id).fee,
+        delta,
+        "record and accrual delta must reflect the same frozen fee",
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 0);
+}
+
+#[test]
+fn test_fee_waiver_revoked_after_open_does_not_charge_pending_settlement() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+    client.set_fee(&100); // 1%
+
+    client.set_fee_waiver(&anchor, &true);
+    assert!(client.is_fee_waived(&anchor), "precondition: anchor waived");
+
+    // Opened while waived: the record freezes a zero fee, and the notional
+    // fee is booked as forgone revenue at that moment.
+    let id = client.open_settlement(&anchor, &asset, &400_000);
+    assert_eq!(
+        client.settlement(&id).fee,
+        0,
+        "waived anchor must snapshot a zero fee",
+    );
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        4_000,
+        "the waived branch books the notional fee as forgone revenue",
+    );
+
+    let accrued_before = client.fees_accrued(&asset);
+
+    // The revoke mid-flight, while the settlement is still Pending.
+    client.set_fee_waiver(&anchor, &false);
+    assert!(!client.is_fee_waived(&anchor));
+
+    // 1. The record is unchanged by the revoke.
+    assert_eq!(
+        client.settlement(&id).fee,
+        0,
+        "Settlement.fee must stay 0 when the waiver is revoked mid-flight",
+    );
+    // 4. Revoking does not un-book revenue already forgone at open time.
+    assert_eq!(
+        client.waived_fee_volume(&asset),
+        4_000,
+        "a revoke after open must not rewind the forgone-revenue counter",
+    );
+
+    client.execute_settlement(&id);
+
+    // 2. Nothing accrued: the settlement was priced at zero and stays there.
+    let delta = client.fees_accrued(&asset) - accrued_before;
+    assert_eq!(
+        delta, 0,
+        "fees_accrued must not grow for a settlement opened under a waiver",
+    );
+    // 3. Both views agree at zero.
+    assert_eq!(
+        client.settlement(&id).fee,
+        delta,
+        "record and accrual delta must both be zero",
+    );
+    assert_eq!(client.waived_fee_volume(&asset), 4_000);
+}
+
 #[test]
 fn test_cancel_restores_liquidity_with_fee_set() {
     let env = Env::default();
@@ -1693,6 +2285,7 @@ fn test_settlement_expiry_disabled_by_default() {
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
     assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
 }
 
 #[test]
@@ -1702,9 +2295,12 @@ fn test_set_settlement_expiry_ledgers_updates_value() {
     let (client, admin) = setup(&env);
     client.initialize(&admin);
 
+    assert!(!client.is_settlement_expiry_configured());
+
     client.set_settlement_expiry_ledgers(&100);
 
     assert_eq!(client.settlement_expiry_ledgers(), 100);
+    assert!(client.is_settlement_expiry_configured());
 }
 
 #[test]
@@ -1713,9 +2309,13 @@ fn test_cancel_expired_settlement_disabled_by_default() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     let id = client.open_settlement(&anchor, &asset, &400);
 
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
+
     // Expiry is disabled (zero) by default, no matter how far the ledger
     // advances.
     env.ledger().set_sequence_number(1_000_000);
+    assert!(!client.is_settlement_expired(&id));
     let err = client
         .try_cancel_expired_settlement(&id)
         .err()
@@ -2331,17 +2931,21 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    assert_operator_rejected!(env, client, operator, "pause", (), client.try_pause(&operator));
-    assert_operator_rejected!(env, client, operator, "unpause", (), client.try_unpause(&operator));
-    assert_operator_rejected!(
-        env,
-        client,
-        operator,
-        "extend_instance_ttl",
-        (),
-        client.try_extend_instance_ttl(&operator)
-    );
-    
+    // After the operator role is cleared, the former operator must be
+    // rejected by the admin-or-operator gated entrypoints. The contract
+    // detects the missing operator and returns `NotAuthorized` before any
+    // host auth check.
+    let err = client.try_pause(&operator).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    let err = client.try_unpause(&operator).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    let err = client
+        .try_extend_instance_ttl(&operator)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+
     // Admin can still act
     client.pause(&admin);
     assert!(client.is_paused());
@@ -2591,8 +3195,49 @@ fn test_min_liquidity_disabled_by_default() {
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
     assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(!client.is_min_liquidity_configured(&asset));
 
     // With no floor configured, a full withdrawal is unaffected.
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    assert_eq!(client.total_liquidity(&asset), 0);
+}
+
+#[test]
+fn test_is_min_liquidity_configured_false_before_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+
+    assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(!client.is_min_liquidity_configured(&asset));
+}
+
+#[test]
+fn test_is_min_liquidity_configured_true_after_nonzero_floor() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    client.set_min_liquidity(&asset, &200);
+
+    assert_eq!(client.min_liquidity(&asset), 200);
+    assert!(client.is_min_liquidity_configured(&asset));
+}
+
+#[test]
+fn test_is_min_liquidity_configured_true_after_explicit_zero_floor() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    client.set_min_liquidity(&asset, &0);
+
+    assert_eq!(client.min_liquidity(&asset), 0);
+    assert!(client.is_min_liquidity_configured(&asset));
+
+    // Existing behavior is unchanged: an explicit zero floor still disables
+    // the withdrawal check, so a full withdrawal remains allowed.
     client.withdraw_liquidity(&anchor, &asset, &1_000);
     assert_eq!(client.total_liquidity(&asset), 0);
 }
@@ -2796,8 +3441,15 @@ fn test_settlement_expiry_disabled_at_zero() {
     env.mock_all_auths();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
-    // Explicitly set expiry to 0 (disabling it)
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(!client.is_settlement_expiry_configured());
+
+    // Explicitly set expiry to 0 (disabling it). This must be distinguishable
+    // from the never-configured state even though both report a zero window.
     client.set_settlement_expiry_ledgers(&0);
+    assert_eq!(client.settlement_expiry_ledgers(), 0);
+    assert!(client.is_settlement_expiry_configured());
+
     let id = client.open_settlement(&anchor, &asset, &400);
 
     // Advance the ledger sequence arbitrarily far in the future
@@ -2888,11 +3540,7 @@ fn test_settlement_age_rejects_unknown_id() {
     let env = Env::default();
     let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
 
-    let err = client
-        .try_settlement_age(&99)
-        .err()
-        .unwrap()
-        .unwrap();
+    let err = client.try_settlement_age(&99).err().unwrap().unwrap();
     assert_eq!(err, Error::SettlementNotFound);
 }
 
@@ -3243,6 +3891,96 @@ fn test_clear_asset_fee_reverts_to_global() {
     assert_eq!(client.asset_fee(&asset), 100);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: clearing an asset fee override reverts to the global rate in
+// effect *at clear time*, not the one in effect when the override was set
+// (issue #143).
+//
+// `effective_fee_bps` resolves the rate live — `get_asset_fee(asset)` falling
+// back to `get_fee_bps()` — and `clear_asset_fee` simply removes the override
+// entry, so nothing is ever cached. The test above cannot detect a regression
+// on that point: it never changes the global rate between setting and
+// clearing the override, so an implementation that restored the rate
+// remembered at override time would produce the same number and stay green.
+//
+// The two tests below insert a global fee change into that window, covering
+// the read side (`asset_fee` / `quote_fee`) and the settlement side
+// (`open_settlement` stamp and `execute_settlement` accrual), which resolve
+// the rate through the same path and must therefore agree.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_clear_asset_fee_reverts_to_latest_global_fee() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    // Global 1%, then a 5% override for this asset.
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &500);
+    assert_eq!(client.asset_fee(&asset), 500);
+
+    // The global moves to 3% while the override is still active: the
+    // override keeps winning, and it is not disturbed by the change.
+    client.set_fee(&300);
+    assert_eq!(
+        client.asset_fee(&asset),
+        500,
+        "an active override must survive a change to the global fee",
+    );
+    assert_eq!(client.fee(), 300);
+
+    client.clear_asset_fee(&asset);
+
+    // The asset falls back to the *current* global rate (3%), not to the 1%
+    // that was in effect when the override was set.
+    assert_eq!(
+        client.asset_fee(&asset),
+        300,
+        "cleared override must revert to the global fee at clear time",
+    );
+    assert_eq!(
+        client.quote_fee(&asset, &1_000),
+        30,
+        "quote_fee must price against the same live rate as asset_fee",
+    );
+}
+
+#[test]
+fn test_clear_asset_fee_charges_latest_global_fee_on_settlement() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000_000);
+
+    client.set_fee(&100);
+    client.set_asset_fee(&asset, &500);
+    client.set_fee(&300);
+    client.clear_asset_fee(&asset);
+
+    // Everything downstream of the clear must price at the current global
+    // rate: the quote, the fee stamped onto the settlement at open, and the
+    // amount actually accrued at execution.
+    let amount = 10_000i128;
+    let quoted = client.quote_fee(&asset, &amount);
+    assert_eq!(
+        quoted, 300,
+        "settlement must be quoted at the global fee in effect at clear time",
+    );
+
+    let id = client.open_settlement(&anchor, &asset, &amount);
+    assert_eq!(
+        client.settlement(&id).fee,
+        quoted,
+        "the fee stamped at open must match the quote",
+    );
+
+    let accrued_before = client.fees_accrued(&asset);
+    client.execute_settlement(&id);
+    assert_eq!(
+        client.fees_accrued(&asset) - accrued_before,
+        quoted,
+        "accrual must match the quote, confirming a single live fee resolution",
+    );
+}
+
 #[test]
 fn test_asset_fee_override_is_per_asset() {
     let env = Env::default();
@@ -3345,6 +4083,54 @@ fn test_operator_can_extend_instance_ttl() {
 }
 
 #[test]
+fn test_extend_instance_ttl_emits_event_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    client.extend_instance_ttl(&admin);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("ttl"),).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_extend_instance_ttl_emits_event_by_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let operator = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_operator(&operator);
+
+    client.extend_instance_ttl(&operator);
+
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("ttl"),).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn test_stranger_cannot_extend_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3400,6 +4186,164 @@ fn test_settlement_count_by_status_counts_across_full_history() {
     assert_eq!(
         client.settlement_count_by_status(&SettlementStatus::Expired),
         0
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Regression: fully paginating `list_settlements_by_status` must partition the
+// settlement history exactly as `settlement_count_by_status` counts it
+// (issue #149).
+//
+// The two functions answer the same question by different means:
+// `settlement_count_by_status` scans every id unconditionally, while
+// `list_settlements_by_status` walks ids from `start` and stops as soon as
+// `limit` matches are collected. Any drift between them means one of the two
+// is wrong, and an off-chain dashboard paging by status would disagree with
+// the headline count it displays elsewhere.
+//
+// Per-status equality alone is weaker than it looks: it survives a bug that
+// double-counts some settlements and drops others in equal measure. The
+// invariant asserted here is a partition — the four per-status id sets are
+// pairwise disjoint and their union is exactly `1..=settlement_count()` —
+// which additionally catches an id served under two statuses and an
+// off-by-one in either walker.
+//
+// Pagination detail the loop below depends on: `start` is a cursor over
+// settlement *ids*, not an offset into the matches. Advancing by
+// `start += limit` is therefore wrong and silently re-serves entries whenever
+// a status does not begin at the cursor — Executed lands on ids {1, 2, 7, 8}
+// here, so that naive advance returns {7, 8} on two consecutive pages. The
+// loop advances to `last returned id + 1` instead, and terminates only on an
+// empty page, so a paginator that ends a page early is still caught. The
+// per-status duplicate assertion below is what pins this down; substituting
+// the naive advance makes it fire.
+//
+// The batch below is also the only coverage of a *non-empty* Expired set:
+// `test_list_settlements_by_status_filters_lifecycle_state` and
+// `test_settlement_count_by_status_counts_across_full_history` both assert
+// only that Expired comes back as 0.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_status_pagination_partitions_settlement_history() {
+    use std::collections::HashSet;
+
+    // Deliberately smaller than any per-status set, to force multi-page
+    // accumulation rather than a single page that happens to hold everything.
+    const PAGE: u32 = 2;
+
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 10_000);
+    client.set_settlement_expiry_ledgers(&10);
+
+    // First wave, opened at ledger 100 so it can be aged past the window.
+    env.ledger().set_sequence_number(100);
+    let a1 = client.open_settlement(&anchor, &asset, &100);
+    let a2 = client.open_settlement(&anchor, &asset, &100);
+    let a3 = client.open_settlement(&anchor, &asset, &100);
+    let a4 = client.open_settlement(&anchor, &asset, &100);
+    let a5 = client.open_settlement(&anchor, &asset, &100);
+    let a6 = client.open_settlement(&anchor, &asset, &100);
+
+    // Resolve part of the first wave while it is still inside the window;
+    // execute_settlement rejects a settlement that is already past expiry.
+    client.execute_settlement(&a1);
+    client.execute_settlement(&a2);
+    client.cancel_settlement(&a3);
+    client.cancel_settlement(&a4);
+
+    // Age past the window and reclaim the remainder. This is the only path
+    // that writes `SettlementStatus::Expired`.
+    env.ledger().set_sequence_number(120);
+    client.cancel_expired_settlement(&a5);
+    client.cancel_expired_settlement(&a6);
+
+    // Second wave, opened after the advance, so it is still inside its own
+    // window at the ledger the assertions run on and stays Pending.
+    let b1 = client.open_settlement(&anchor, &asset, &100);
+    let b2 = client.open_settlement(&anchor, &asset, &100);
+    let b3 = client.open_settlement(&anchor, &asset, &100);
+    let b4 = client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    client.execute_settlement(&b1);
+    client.execute_settlement(&b2);
+    client.cancel_settlement(&b3);
+    client.cancel_settlement(&b4);
+
+    // Interleaved on purpose: Executed at {a1, a2, b1, b2} = {1, 2, 7, 8} is
+    // exactly the non-contiguous shape that breaks a `start += limit` walker.
+    assert_eq!(client.settlement_count(), 12);
+
+    // Fully paginate one status, accumulating ids across pages.
+    let collect_ids = |status: SettlementStatus| -> HashSet<u64> {
+        let mut ids = HashSet::new();
+        let mut start = 1u64;
+        loop {
+            let page = client.list_settlements_by_status(&status, &start, &PAGE);
+            if page.is_empty() {
+                break;
+            }
+            assert!(
+                page.len() <= PAGE,
+                "a page returned more entries than the requested limit"
+            );
+            for settlement in page.iter() {
+                assert_eq!(
+                    settlement.status, status,
+                    "the status filter returned a settlement in another state"
+                );
+                assert!(
+                    ids.insert(settlement.id),
+                    "settlement {} was served twice within one status",
+                    settlement.id
+                );
+            }
+            // Advance by id, not by limit: `start` is an id cursor.
+            start = page.get(page.len() - 1).unwrap().id + 1;
+        }
+        ids
+    };
+
+    let pending = collect_ids(SettlementStatus::Pending);
+    let executed = collect_ids(SettlementStatus::Executed);
+    let cancelled = collect_ids(SettlementStatus::Cancelled);
+    let expired = collect_ids(SettlementStatus::Expired);
+
+    // Each accumulated set matches the unconditional scan, per status.
+    for (status, ids) in [
+        (SettlementStatus::Pending, &pending),
+        (SettlementStatus::Executed, &executed),
+        (SettlementStatus::Cancelled, &cancelled),
+        (SettlementStatus::Expired, &expired),
+    ] {
+        assert_eq!(
+            ids.len() as u64,
+            client.settlement_count_by_status(&status),
+            "paginated accumulation disagrees with settlement_count_by_status"
+        );
+        // A partition of empty sets would satisfy the checks below vacuously.
+        assert!(!ids.is_empty(), "the batch must exercise every status");
+    }
+
+    // The four sets are pairwise disjoint.
+    let sets = [&pending, &executed, &cancelled, &expired];
+    for (i, left) in sets.iter().enumerate() {
+        for right in sets.iter().skip(i + 1) {
+            assert!(
+                left.intersection(right).next().is_none(),
+                "a settlement id was served under two different statuses"
+            );
+        }
+    }
+
+    // Their union is every id ever assigned — no gaps, no strays.
+    let union: HashSet<u64> = sets.iter().flat_map(|set| set.iter().copied()).collect();
+    let every_id: HashSet<u64> = (1..=client.settlement_count()).collect();
+    assert_eq!(
+        union, every_id,
+        "the per-status sets must cover exactly 1..=settlement_count()"
     );
 }
 
@@ -4363,51 +5307,57 @@ fn test_list_settlements_by_asset_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.get(1).unwrap().id, id2);
 }
 
-// --- list_settlements_by_anchor_and_asset ---
+// --- list_settlements_by_anchor_asset ---
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_start_past_end_returns_empty() {
+fn test_list_settlements_by_anchor_asset_start_past_end_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &3, &10).len(),
+        client
+            .list_settlements_by_anchor_asset(&anchor, &asset, &3, &10)
+            .len(),
         0
     );
     assert_eq!(
         client
-            .list_settlements_by_anchor_and_asset(&anchor, &asset, &u64::MAX, &10)
+            .list_settlements_by_anchor_asset(&anchor, &asset, &u64::MAX, &10)
             .len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_limit_zero_returns_empty() {
+fn test_list_settlements_by_anchor_asset_limit_zero_returns_empty() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     client.open_settlement(&anchor, &asset, &100);
 
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &0).len(),
+        client
+            .list_settlements_by_anchor_asset(&anchor, &asset, &1, &0)
+            .len(),
         0
     );
     assert_eq!(
-        client.list_settlements_by_anchor_and_asset(&anchor, &asset, &0, &0).len(),
+        client
+            .list_settlements_by_anchor_asset(&anchor, &asset, &0, &0)
+            .len(),
         0
     );
 }
 
 #[test]
-fn test_list_settlements_by_anchor_and_asset_limit_exceeds_remaining_returns_all() {
+fn test_list_settlements_by_anchor_asset_limit_exceeds_remaining_returns_all() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
     let id1 = client.open_settlement(&anchor, &asset, &100);
     let id2 = client.open_settlement(&anchor, &asset, &100);
 
-    let result = client.list_settlements_by_anchor_and_asset(&anchor, &asset, &1, &1_000);
+    let result = client.list_settlements_by_anchor_asset(&anchor, &asset, &1, &1_000);
     assert_eq!(result.len(), 2);
     assert_eq!(result.get(0).unwrap().id, id1);
     assert_eq!(result.get(1).unwrap().id, id2);
@@ -4467,6 +5417,72 @@ fn test_list_settlements_by_status_limit_exceeds_remaining_returns_all() {
     assert_eq!(result.len(), 2);
     assert_eq!(result.get(0).unwrap().id, id1);
     assert_eq!(result.get(1).unwrap().id, id2);
+}
+
+#[test]
+fn test_list_settlements_beyond_count() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    let count = client.settlement_count();
+    assert_eq!(count, 2);
+
+    let start_beyond = 100u64;
+
+    assert_eq!(client.list_settlements(&start_beyond, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &start_beyond, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &start_beyond, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &start_beyond, &10)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_list_settlements_off_by_one_boundary() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &100);
+
+    let count = client.settlement_count();
+    assert_eq!(count, 2);
+
+    let start_boundary = count + 1;
+
+    assert_eq!(client.list_settlements(&start_boundary, &10).len(), 0);
+    assert_eq!(
+        client
+            .list_settlements_by_anchor(&anchor, &start_boundary, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_asset(&asset, &start_boundary, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .list_settlements_by_status(&SettlementStatus::Pending, &start_boundary, &10)
+            .len(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4675,6 +5691,159 @@ proptest! {
             prop_assert!(res.is_ok() || res.is_err());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// reserved_liquidity – per-asset pending settlement reservation queries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reserved_liquidity_sums_pending_for_asset() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Three pending settlements: 100 + 200 + 300 = 600
+    client.open_settlement(&anchor, &asset, &100);
+    client.open_settlement(&anchor, &asset, &200);
+    client.open_settlement(&anchor, &asset, &300);
+
+    assert_eq!(client.reserved_liquidity(&asset), 600);
+}
+
+#[test]
+fn test_reserved_liquidity_excludes_other_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &1_000);
+    client.provide_liquidity(&anchor, &eurc, &1_000);
+
+    // USDC pending: 100 + 300 = 400
+    client.open_settlement(&anchor, &usdc, &100);
+    client.open_settlement(&anchor, &usdc, &300);
+
+    // EURC pending: 500
+    client.open_settlement(&anchor, &eurc, &500);
+
+    // reserved_liquidity for USDC must be 400, not 900
+    assert_eq!(client.reserved_liquidity(&usdc), 400);
+    // reserved_liquidity for EURC must be 500
+    assert_eq!(client.reserved_liquidity(&eurc), 500);
+}
+
+#[test]
+fn test_reserved_liquidity_excludes_non_pending_statuses() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    client.set_settlement_expiry_ledgers(&10);
+
+    // Pending – should count
+    let pending = client.open_settlement(&anchor, &asset, &100);
+
+    // Executed – should NOT count
+    let executed = client.open_settlement(&anchor, &asset, &200);
+    client.execute_settlement(&executed);
+
+    // Cancelled – should NOT count
+    let cancelled = client.open_settlement(&anchor, &asset, &300);
+    client.cancel_settlement(&cancelled);
+
+    // Expired – should NOT count
+    let expired = client.open_settlement(&anchor, &asset, &400);
+    env.ledger().set_sequence_number(15);
+    client.cancel_expired_settlement(&expired);
+
+    // Only the first (pending) settlement of 100 should be counted
+    assert_eq!(client.reserved_liquidity(&asset), 100);
+}
+
+#[test]
+fn test_reserved_liquidity_zero_when_no_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // No settlements opened at all
+    assert_eq!(client.reserved_liquidity(&asset), 0);
+
+    // Open, then execute all settlements – none pending
+    let id = client.open_settlement(&anchor, &asset, &400);
+    client.execute_settlement(&id);
+
+    assert_eq!(client.reserved_liquidity(&asset), 0);
+
+    // Also zero for an asset that never had any settlements
+    let other = symbol_short!("EURC");
+    assert_eq!(client.reserved_liquidity(&other), 0);
+}
+
+#[test]
+fn test_reserved_liquidity_mixed_assets_and_statuses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&a1);
+    client.register_anchor(&a2);
+    client.set_fee(&50);
+    client.set_settlement_expiry_ledgers(&10);
+
+    // Fund both assets
+    client.provide_liquidity(&a1, &usdc, &10_000);
+    client.provide_liquidity(&a1, &eurc, &10_000);
+    client.provide_liquidity(&a2, &usdc, &10_000);
+    client.provide_liquidity(&a2, &eurc, &10_000);
+
+    // USDC pending: 100 (a1) + 300 (a2) = 400
+    client.open_settlement(&a1, &usdc, &100);
+    client.open_settlement(&a2, &usdc, &300);
+
+    // EURC pending: 200 (a1) = 200
+    client.open_settlement(&a1, &eurc, &200);
+
+    // USDC executed (not pending): 500 (a1)
+    let usdc_exec = client.open_settlement(&a1, &usdc, &500);
+    client.execute_settlement(&usdc_exec);
+
+    // EURC cancelled (not pending): 400 (a2)
+    let eurc_cancel = client.open_settlement(&a2, &eurc, &400);
+    client.cancel_settlement(&eurc_cancel);
+
+    // EURC expired (not pending): 150 (a1)
+    let eurc_expire = client.open_settlement(&a1, &eurc, &150);
+    env.ledger().set_sequence_number(20);
+    client.cancel_expired_settlement(&eurc_expire);
+
+    assert_eq!(client.reserved_liquidity(&usdc), 400);
+    assert_eq!(client.reserved_liquidity(&eurc), 200);
+}
+
+#[test]
+fn test_reserved_liquidity_returns_zero_for_asset_with_only_non_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // Open and immediately execute
+    let id1 = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&id1);
+
+    // Open and cancel
+    let id2 = client.open_settlement(&anchor, &asset, &200);
+    client.cancel_settlement(&id2);
+
+    // No settlements are currently pending
+    assert_eq!(client.reserved_liquidity(&asset), 0);
 }
 
 // --- hello (smoke test that setup still works after all new tests) ---
