@@ -43,6 +43,14 @@ pub enum SettlementStatus {
     Expired,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnchorStatus {
+    NeverRegistered,
+    Active,
+    Deregistered,
+}
+
 /// A request to draw `amount` of `asset` liquidity for cross-anchor settlement.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

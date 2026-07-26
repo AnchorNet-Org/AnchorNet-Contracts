@@ -12,7 +12,7 @@ mod storage;
 mod types;
 
 pub use error::Error;
-pub use types::{ContractInfo, Pool, Settlement, SettlementStatus};
+pub use types::{AnchorStatus, ContractInfo, Pool, Settlement, SettlementStatus};
 
 /// Maximum protocol fee that can be configured: 1000 bps (10%).
 const MAX_FEE_BPS: u32 = 1_000;
@@ -421,6 +421,10 @@ impl AnchornetContract {
     /// Returns `true` if `anchor` is a registered liquidity provider.
     pub fn is_anchor(env: Env, anchor: Address) -> bool {
         storage::is_anchor(&env, &anchor)
+    }
+
+    pub fn anchor_status(env: Env, anchor: Address) -> AnchorStatus {
+        storage::anchor_status(&env, &anchor)
     }
 
     /// Returns up to `limit` currently registered anchors, in registration

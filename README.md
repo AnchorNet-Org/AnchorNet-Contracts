@@ -21,75 +21,87 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo fmt --all -- --check
 cargo build
 cargo test
-Project structure
-src/lib.rs – contract entrypoint and public interface
-src/error.rs – error codes returned to clients
-docs/ADMIN.md – privileged admin/operator roles, lifecycle, and security properties
-docs/ERRORS.md – stable error-code reference and originating entrypoints
-docs/PAGINATION.md – stable pagination semantics reference and worked examples
-src/types.rs – on-chain data types (Pool)
-src/storage.rs – storage keys and TTL-aware accessors
-src/events.rs – event publishing helpers
-src/test.rs – unit tests
-Cargo.toml – dependencies and crate config
-Contract interface
-The AnchornetContract tracks per-asset liquidity pools funded by registered
+```
+
+## Project structure
+
+- `src/lib.rs` – contract entrypoint and public interface
+- `src/error.rs` – error codes returned to clients
+- [`docs/ADMIN.md`](docs/ADMIN.md) – privileged admin/operator roles, lifecycle, and security properties
+- [`docs/ERRORS.md`](docs/ERRORS.md) – stable error-code reference and originating entrypoints
+- [`docs/PAGINATION.md`](docs/PAGINATION.md) – stable pagination semantics reference and worked examples
+- [`docs/EVENTS.md`](docs/EVENTS.md) – event topics, argument types, and indexer integration guide
+- `src/types.rs` – on-chain data types (`Pool`)
+- `src/storage.rs` – storage keys and TTL-aware accessors
+- `src/events.rs` – event publishing helpers
+- `src/test.rs` – unit tests
+- `Cargo.toml` – dependencies and crate config
+
+## Contract interface
+
+The `AnchornetContract` tracks per-asset liquidity pools funded by registered
 anchors. The off-chain indexer subscribes to the emitted events to mirror pool
 state.
 
-Function	Auth	Description
-initialize(admin)	once	Set the contract administrator
-admin()	–	Read the current administrator
-set_admin(new_admin)	admin	Transfer administration in a single step
-propose_admin(candidate)	admin	Propose candidate as the next administrator
-accept_admin(candidate)	candidate	Accept a pending admin transfer
-pending_admin()	–	Read the proposed next administrator, if any
-register_anchor(anchor)	admin	Approve an anchor as a liquidity provider
-register_anchors(anchors)	admin	Approve a batch of anchors atomically in one call
-is_anchor(anchor)	–	Check whether an address is registered
-list_anchors(start, limit)	–	Page through currently registered anchors
-anchor_count()	–	Read the number of currently registered anchors
-provide_liquidity(provider, asset, amount)	provider	Add liquidity to a pool
-provide_liquidity_multi(provider, requests)	provider	Add liquidity to several assets in one call and authorization; validates the whole batch (no duplicate assets) before applying any of it
-withdraw_liquidity(provider, asset, amount)	provider	Remove liquidity from a pool
-withdraw_all_liquidity(provider, asset)	provider	Withdraw a provider's entire balance in one call
-withdraw_liquidity_multi(provider, requests)	provider	Withdraw from several assets in one call and authorization; validates the whole batch (no duplicate assets) before applying any of it
-deregister_anchor(anchor)	admin	Remove an anchor from the approved set
-pool(asset)	–	Read aggregate pool state
-total_liquidity(asset)	–	Read total liquidity for an asset
-total_liquidity_all()	–	Read the sum of total liquidity across every asset ever funded
-balance(provider, asset)	–	Read a provider's balance
-anchor_balances(provider, start, limit)	–	Page through a provider's non-zero balances across every known asset
-list_assets(start, limit)	–	Page through every asset that has ever had liquidity provided
-asset_count()	–	Read the number of distinct assets that have ever had liquidity provided
-set_min_liquidity(asset, floor)	admin	Set the minimum liquidity floor an asset's pool may not be withdrawn below (0 disables)
-min_liquidity(asset)	–	Read the minimum liquidity floor configured for an asset
-set_max_settlement_amount(asset, amount)	admin	Cap the amount a single settlement may reserve for an asset (0 disables)
-max_settlement_amount(asset)	–	Read the maximum settlement amount configured for an asset
-Admin & lifecycle
-Function	Auth	Description
-pause(caller) / unpause(caller)	admin or operator	Halt or resume liquidity & settlement mutations
-set_operator(operator)	admin	Appoint an operator that may pause/unpause but cannot change fees or admin
-clear_operator()	admin	Revoke the operator role entirely
-operator()	–	Read the currently appointed operator
-is_operator(address)	–	Check whether an address is the currently appointed operator
-extend_instance_ttl(caller)	admin or operator	Extend the contract instance/code TTL so it survives long inactivity
-Note: extend_instance_ttl only refreshes the instance storage bucket. Persistent entries (e.g., Anchor, Pool, Balance, etc.) have independent TTLs managed by per‑key extend calls on read/write.
+| Function | Auth | Description |
+|----------|------|-------------|
+| `initialize(admin)` | once | Set the contract administrator |
+| `admin()` | – | Read the current administrator |
+| `set_admin(new_admin)` | admin | Transfer administration in a single step |
+| `propose_admin(candidate)` | admin | Propose `candidate` as the next administrator |
+| `accept_admin(candidate)` | candidate | Accept a pending admin transfer |
+| `pending_admin()` | – | Read the proposed next administrator, if any |
+| `register_anchor(anchor)` | admin | Approve an anchor as a liquidity provider |
+| `register_anchors(anchors)` | admin | Approve a batch of anchors atomically in one call |
+| `is_anchor(anchor)` | – | Check whether an address is registered |
+| `anchor_status(anchor)` | – | Read the registration status (`NeverRegistered`, `Active`, or `Deregistered`) of an address |
+| `list_anchors(start, limit)` | – | Page through currently registered anchors |
+| `anchor_count()` | – | Read the number of currently registered anchors |
+| `provide_liquidity(provider, asset, amount)` | provider | Add liquidity to a pool |
+| `provide_liquidity_multi(provider, requests)` | provider | Add liquidity to several assets in one call and authorization; validates the whole batch (no duplicate assets) before applying any of i[...]
+| `withdraw_liquidity(provider, asset, amount)` | provider | Remove liquidity from a pool |
+| `withdraw_all_liquidity(provider, asset)` | provider | Withdraw a provider's entire balance in one call |
+| `withdraw_liquidity_multi(provider, requests)` | provider | Withdraw from several assets in one call and authorization; validates the whole batch (no duplicate assets) before applying any of it [...]
+| `deregister_anchor(anchor)` | admin | Remove an anchor from the approved set |
+| `pool(asset)` | – | Read aggregate pool state |
+| `total_liquidity(asset)` | – | Read total liquidity for an asset |
+| `total_liquidity_all()` | – | Read the sum of total liquidity across every asset ever funded |
+| `balance(provider, asset)` | – | Read a provider's balance |
+| `anchor_balances(provider, start, limit)` | – | Page through a provider's non-zero balances across every known asset |
+| `list_assets(start, limit)` | – | Page through every asset that has ever had liquidity provided |
+| `asset_count()` | – | Read the number of distinct assets that have ever had liquidity provided |
+| `set_min_liquidity(asset, floor)` | admin | Set the minimum liquidity floor an asset's pool may not be withdrawn below (0 disables) |
+| `min_liquidity(asset)` | – | Read the minimum liquidity floor configured for an asset |
+| `set_max_settlement_amount(asset, amount)` | admin | Cap the amount a single settlement may reserve for an asset (0 disables) |
+| `max_settlement_amount(asset)` | – | Read the maximum settlement amount configured for an asset |
 
-| set_fee(bps) | admin | Set the protocol fee in basis points (max 1000) |
-| fee() / quote_fee(asset, amount) | – | Read the global fee rate / preview the effective fee for an asset |
-| max_fee_bps() | – | Read the maximum fee set_fee/set_asset_fee will accept |
-| set_asset_fee(asset, bps) | admin | Override the protocol fee for one asset, independent of the global rate |
-| clear_asset_fee(asset) | admin | Remove an asset's fee override, reverting it to the global rate |
-| asset_fee(asset) | – | Read the effective fee for an asset (its override, or the global rate) |
-| collect_fees(asset) | admin | Collect accrued protocol fees for an asset |
-| fees_accrued(asset) | – | Read uncollected fees for an asset |
-| total_fees_accrued() | – | Read the sum of uncollected fees across every asset ever funded |
-| set_fee_waiver(anchor, waived) | admin | Grant or revoke a fee waiver for a registered anchor |
-| is_fee_waived(anchor) | – | Check whether an anchor is exempt from settlement fees |
-| list_fee_waived_anchors(start, limit) | – | Page through currently registered anchors with an active fee waiver |
-| fee_waived_anchor_count() | – | Read the number of currently registered anchors with an active fee waiver |
-| version() | – | Read the contract interface version |
+### Admin & lifecycle
+
+| Function | Auth | Description |
+|----------|------|-------------|
+| `pause(caller)` / `unpause(caller)` | admin or operator | Halt or resume liquidity & settlement mutations |
+| `set_operator(operator)` | admin | Appoint an operator that may pause/unpause but cannot change fees or admin |
+| `clear_operator()` | admin | Revoke the operator role entirely |
+| `operator()` | – | Read the currently appointed operator |
+| `is_operator(address)` | – | Check whether an address is the currently appointed operator |
+| `extend_instance_ttl(caller)` | admin or operator | Extend the contract instance/code TTL so it survives long inactivity |
+
+> **Note:** `extend_instance_ttl` only refreshes the **instance** storage bucket. Persistent entries (e.g., `Anchor`, `Pool`, `Balance`, etc.) have independent TTLs managed by per‑key `extend` c[...]
+
+| `set_fee(bps)` | admin | Set the protocol fee in basis points (max 1000) |
+| `fee()` / `quote_fee(asset, amount)` | – | Read the global fee rate / preview the effective fee for an asset |
+| `max_fee_bps()` | – | Read the maximum fee `set_fee`/`set_asset_fee` will accept |
+| `set_asset_fee(asset, bps)` | admin | Override the protocol fee for one asset, independent of the global rate |
+| `clear_asset_fee(asset)` | admin | Remove an asset's fee override, reverting it to the global rate |
+| `asset_fee(asset)` | – | Read the effective fee for an asset (its override, or the global rate) |
+| `collect_fees(asset)` | admin | Collect accrued protocol fees for an asset |
+| `fees_accrued(asset)` | – | Read uncollected fees for an asset |
+| `total_fees_accrued()` | – | Read the sum of uncollected fees across every asset ever funded |
+| `set_fee_waiver(anchor, waived)` | admin | Grant or revoke a fee waiver for a registered anchor |
+| `is_fee_waived(anchor)` | – | Check whether an anchor is exempt from settlement fees |
+| `list_fee_waived_anchors(start, limit)` | – | Page through currently registered anchors with an active fee waiver |
+| `fee_waived_anchor_count()` | – | Read the number of currently registered anchors with an active fee waiver |
+| `version()` | – | Read the contract interface version |
 
 Fee calculations intentionally use floor division:
 floor(amount * bps / 10_000). As a result, tiny settlements can have a
@@ -183,40 +195,80 @@ fifteen-entry require_admin list are derived directly from the
 corresponding call sites in src/lib.rs. When a new entrypoint is added,
 check which guard it calls and update this table accordingly.
 
-Events
-("init",) – contract initialized
-("admin",) – administrator changed (via set_admin or accept_admin)
-("propose",) – admin transfer proposed
-("anchor", anchor) / ("deanchor", anchor) – anchor registered / removed
-("provide", provider, asset) – liquidity provided
-("onboarded", asset) – first liquidity provision for a new asset
-("withdraw", provider, asset) – liquidity withdrawn
-("paused",) – paused flag flipped (data: bool)
-("fee",) – fee rate changed (data: u32 bps)
-("waiver", anchor) – anchor fee waiver granted or revoked
-("settle", anchor, asset) – settlement opened
-("executed", id) / ("cancelled", id) – settlement finalized / cancelled
-("expired", id) – settlement reclaimed after timing out
-("expiry",) – settlement expiry window changed
-("collect", asset) – fees collected
-("minliq", asset) – minimum liquidity floor configured
-("operator",) – operator appointed or replaced
-("op_clear",) – operator role revoked
-Contract metadata
-The compiled wasm embeds Name and Description entries (via
-contractmeta!) so tooling that inspects the deployed contract can identify
+| Entrypoint | Description |
+|---|---|
+| `set_admin(new_admin)` | Transfer administration (single-step) |
+| `propose_admin(candidate)` | Initiate a two-step admin transfer |
+| `set_operator(operator)` | Appoint or replace the operator |
+| `register_anchor(anchor)` | Approve a new liquidity provider |
+| `register_anchors(anchors)` | Batch-approve liquidity providers |
+| `deregister_anchor(anchor)` | Remove an anchor from the approved set |
+| `set_fee(bps)` | Set the global protocol fee |
+| `set_asset_fee(asset, bps)` | Override the fee for one asset |
+| `clear_asset_fee(asset)` | Remove an asset's fee override |
+| `set_fee_waiver(anchor, waived)` | Grant or revoke a fee waiver |
+| `collect_fees(asset)` | Collect accrued protocol fees |
+| `set_min_liquidity(asset, floor)` | Set the minimum liquidity floor |
+| `set_max_settlement_amount(asset, amount)` | Cap per-settlement reserve size |
+| `set_settlement_expiry_ledgers(ledgers)` | Set the settlement expiry window |
+| `execute_settlement(id)` | Finalize a pending settlement |
+
+> **Note:** The three-entry `require_admin_or_operator` list and the
+> fifteen-entry `require_admin` list are derived directly from the
+> corresponding call sites in `src/lib.rs`. When a new entrypoint is added,
+> check which guard it calls and update this table accordingly.
+
+### Events
+
+For detailed event documentation, including argument shapes, emission sites, and indexer integration guidance, see [`docs/EVENTS.md`](docs/EVENTS.md).
+
+**Event topics at a glance:**
+
+- `("init",)` – contract initialized
+- `("admin",)` – administrator changed (via `set_admin` or `accept_admin`)
+- `("propose",)` – admin transfer proposed
+- `("anchor", anchor)` / `("deanchor", anchor)` – anchor registered / removed
+- `("provide", provider, asset)` – liquidity provided
+- `("onboarded", asset)` – first liquidity provision for a new asset
+- `("withdraw", provider, asset)` – liquidity withdrawn
+- `("paused",)` – paused flag flipped (data: `bool`)
+- `("fee",)` – fee rate changed (data: `u32` bps)
+- `("waiver", anchor)` – anchor fee waiver granted or revoked
+- `("settle", anchor, asset)` – settlement opened
+- `("executed", id)` / `("cancelled", id)` – settlement finalized / cancelled
+- `("expired", id)` – settlement reclaimed after timing out
+- `("expiry",)` – settlement expiry window changed
+- `("collect", asset)` – fees collected
+- `("minliq", asset)` – minimum liquidity floor configured
+- `("maxamt", asset)` – maximum settlement amount configured
+- `("assetfee", asset)` – asset-specific fee override set (data: `u32` bps)
+- `("feeclear", asset)` – asset-specific fee override cleared
+- `("operator",)` – operator appointed or replaced
+- `("op_clear",)` – operator role revoked
+
+## Contract metadata
+
+The compiled wasm embeds `Name` and `Description` entries (via
+`contractmeta!`) so tooling that inspects the deployed contract can identify
 it without an off-chain registry.
 
-Commands
-Command	Description
-cargo build	Build the contract
-cargo test	Run unit tests
-cargo fmt --all	Format code
-cargo fmt --all -- --check	Check formatting (CI)
-Contributing
-Fork the repo and create a branch from main.
-Make changes; keep formatting with cargo fmt --all.
-Run cargo fmt --all -- --check, cargo build, and cargo test.
-Open a pull request. CI will run format check, build, and tests.
-License
+## Commands
+
+| Command | Description |
+|--------|-------------|
+| `cargo build` | Build the contract |
+| `cargo test` | Run unit tests |
+| `cargo fmt --all` | Format code |
+| `cargo fmt --all -- --check` | Check formatting (CI) |
+
+## Contributing
+
+1. Fork the repo and create a branch from `main`.
+2. Make changes; keep formatting with `cargo fmt --all`.
+3. If modifying public contract functions, parameters, return types, data structures, error codes, or events, review and complete the [`Public API Compatibility Checklist`](docs/PUBLIC_API_CHECKLIST.md).
+4. Run `cargo fmt --all -- --check`, `cargo build`, and `cargo test`.
+5. Open a pull request. CI will run format check, build, and tests.
+
+## License
+
 MIT

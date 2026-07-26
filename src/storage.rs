@@ -27,7 +27,7 @@
 
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
-use crate::types::{Pool, Settlement};
+use crate::types::{AnchorStatus, Pool, Settlement};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 /// How long an entry's TTL is extended to on access (~30 days).
@@ -194,6 +194,21 @@ pub fn is_anchor(env: &Env, anchor: &Address) -> bool {
         extend(env, &key);
     }
     env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn anchor_status(env: &Env, anchor: &Address) -> AnchorStatus {
+    let key = DataKey::Anchor(anchor.clone());
+    match env.storage().persistent().get::<DataKey, bool>(&key) {
+        Some(true) => {
+            extend(env, &key);
+            AnchorStatus::Active
+        }
+        Some(false) => {
+            extend(env, &key);
+            AnchorStatus::Deregistered
+        }
+        None => AnchorStatus::NeverRegistered,
+    }
 }
 
 /// Marks `anchor` as registered.
