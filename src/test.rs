@@ -6892,3 +6892,70 @@ fn test_open_settlement_enforces_per_asset_max_settlement_amount_cap() {
     let id2 = client.open_settlement(&anchor, &ast2, &600);
     assert_eq!(id2, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: `has_asset_fee_override` disambiguates override-present-at-zero
+// vs no-override-at-zero (the collapsed Option ambiguity that motivated this
+// view). Cases: no override + global fee 0bps, explicit override of 0bps,
+// explicit override of nonzero rate, and after `clear_asset_fee`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_has_asset_fee_override_false_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    // No override set; global fee is 0 by default.
+    assert!(!client.has_asset_fee_override(&asset));
+    assert_eq!(client.asset_fee(&asset), 0);
+}
+
+#[test]
+fn test_has_asset_fee_override_true_after_set_zero_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_fee(&100); // global is non-zero
+
+    // Explicit 0 bps override — distinct from no override.
+    client.set_asset_fee(&asset, &0);
+    assert!(client.has_asset_fee_override(&asset),
+        "an explicit 0 bps override must be distinguishable from no override");
+    assert_eq!(client.asset_fee(&asset), 0);
+}
+
+#[test]
+fn test_has_asset_fee_override_true_for_nonzero_override() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_fee(&50); // global 50 bps
+
+    client.set_asset_fee(&asset, &250);
+    assert!(client.has_asset_fee_override(&asset));
+    assert_eq!(client.asset_fee(&asset), 250);
+}
+
+#[test]
+fn test_has_asset_fee_override_false_after_clear() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+
+    client.set_asset_fee(&asset, &0);
+    assert!(client.has_asset_fee_override(&asset));
+
+    client.clear_asset_fee(&asset);
+    assert!(!client.has_asset_fee_override(&asset),
+        "clear_asset_fee must revert override visibility to false");
+    assert_eq!(client.asset_fee(&asset), 0); // falls back to global fee (0)
+}
