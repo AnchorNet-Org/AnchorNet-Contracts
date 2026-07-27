@@ -1074,6 +1074,22 @@ impl AnchornetContract {
         storage::get_settlement(&env, id).is_some()
     }
 
+    /// Returns the [`SettlementStatus`] of the settlement with `id`, or
+    /// [`Error::SettlementNotFound`] if the settlement does not exist.
+    ///
+    /// Unlike [`settlement`](Self::settlement), which returns the full
+    /// [`Settlement`] struct, this entrypoint projects out only the
+    /// `status` field. For keeper polling loops (e.g. deciding whether to
+    /// call [`execute_settlement`](Self::execute_settlement) or
+    /// [`cancel_expired_settlement`](Self::cancel_expired_settlement)),
+    /// the narrower return type reduces cross-contract call payload size
+    /// and keeps settlement-state checks auditable in one place.
+    pub fn settlement_status(env: Env, id: u64) -> Result<SettlementStatus, Error> {
+        Ok(storage::get_settlement(&env, id)
+            .ok_or(Error::SettlementNotFound)?
+            .status)
+    }
+
     /// Returns `true` if a settlement with `id` exists and its status is
     /// [`SettlementStatus::Pending`]. Returns `false` (not an error) for a
     /// missing id or any terminal-state settlement. Designed as a minimal-payload
