@@ -1,6 +1,6 @@
 use crate::storage::DataKey;
 use crate::{
-    AnchorStatus, AnchornetContract, AnchornetContractClient, Error, SettlementStatus,
+    AnchorStatus, AnchornetContract, AnchornetContractClient, Error, Pool, SettlementStatus,
     BPS_DENOMINATOR,
 };
 use proptest::prelude::*;
@@ -80,6 +80,44 @@ fn setup(env: &Env) -> (AnchornetContractClient<'_>, Address) {
     let client = AnchornetContractClient::new(env, &contract_id);
     let admin = Address::generate(env);
     (client, admin)
+}
+
+/// Initializes a contract with the provider under test and a seed provider,
+/// then uses the seed provider to create non-empty pools for every asset.
+/// Keeping the tested provider's balances at zero makes a partial application
+/// observable in all three accounting fields: `Balance`, `Pool.total`, and
+/// `Pool.providers`.
+fn funded_multi_asset_pools<'a>(
+    env: &'a Env,
+    assets: &[Symbol],
+) -> (AnchornetContractClient<'a>, Address) {
+    env.mock_all_auths();
+    let (client, admin) = setup(env);
+    let provider = Address::generate(env);
+    let seed_provider = Address::generate(env);
+
+    client.initialize(&admin);
+    client.register_anchor(&provider);
+    client.register_anchor(&seed_provider);
+    for asset in assets {
+        client.provide_liquidity(&seed_provider, asset, &1_000);
+    }
+
+    (client, provider)
+}
+
+/// Asserts the complete liquidity-accounting snapshot for one provider/asset.
+fn assert_liquidity_unchanged(
+    client: &AnchornetContractClient<'_>,
+    provider: &Address,
+    asset: &Symbol,
+    expected_balance: i128,
+    expected_pool: &Pool,
+) {
+    assert_eq!(client.balance(provider, asset), expected_balance);
+    let actual_pool = client.pool(asset);
+    assert_eq!(actual_pool.total, expected_pool.total);
+    assert_eq!(actual_pool.providers, expected_pool.providers);
 }
 
 /// Initializes the contract, registers one anchor, and funds a pool.
@@ -1419,7 +1457,7 @@ fn test_oldest_pending_settlement_id_returns_none_when_empty() {
     let usdc = symbol_short!("USDC");
 
     client.initialize(&admin);
-    
+
     assert_eq!(client.oldest_pending_settlement_id(&usdc), None);
 }
 
@@ -1456,7 +1494,7 @@ fn test_oldest_pending_settlement_id_skips_other_assets_and_statuses() {
 
     // eurc pending -> should be ignored because different asset
     let _s1 = client.open_settlement(&anchor, &eurc, &100);
-    
+
     // usdc pending -> we'll execute it to change status
     let s2 = client.open_settlement(&anchor, &usdc, &100);
     client.execute_settlement(&s2);
@@ -5158,23 +5196,15 @@ fn test_provide_liquidity_multi_blocked_while_paused() {
 #[test]
 fn test_provide_liquidity_multi_zero_mutations_on_late_duplicate_failure() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
     let asset1 = symbol_short!("AST1");
     let asset2 = symbol_short!("AST2");
+    let (client, anchor) = funded_multi_asset_pools(&env, &[asset1.clone(), asset2.clone()]);
 
-    client.initialize(&admin);
-    client.register_anchor(&anchor);
-
-    // Snapshot balances and pool totals for every affected asset before the
-    // call. All are zero since no liquidity has been provided yet.
-    let bal1_before = client.balance(&anchor, &asset1);
-    let bal2_before = client.balance(&anchor, &asset2);
-    let total1_before = client.total_liquidity(&asset1);
-    let total2_before = client.total_liquidity(&asset2);
-    let providers1_before = client.pool(&asset1).providers;
-    let providers2_before = client.pool(&asset2).providers;
+    // Snapshot every accounting field for every distinct asset in the batch.
+    let balance1_before = client.balance(&anchor, &asset1);
+    let balance2_before = client.balance(&anchor, &asset2);
+    let pool1_before = client.pool(&asset1);
+    let pool2_before = client.pool(&asset2);
 
     // First two entries are valid distinct assets; third is a duplicate of the
     // first — the invalid entry appears *after* valid ones.
@@ -5191,14 +5221,9 @@ fn test_provide_liquidity_multi_zero_mutations_on_late_duplicate_failure() {
         .unwrap();
     assert_eq!(err, Error::DuplicateAssetInBatch);
 
-    // Verify state unchanged for every asset in the batch — including the valid
-    // ones (asset1, asset2) that appeared before the invalid entry.
-    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
-    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
-    assert_eq!(client.total_liquidity(&asset1), total1_before);
-    assert_eq!(client.total_liquidity(&asset2), total2_before);
-    assert_eq!(client.pool(&asset1).providers, providers1_before);
-    assert_eq!(client.pool(&asset2).providers, providers2_before);
+    // The valid prefix must not alter Balance, Pool.total, or Pool.providers.
+    assert_liquidity_unchanged(&client, &anchor, &asset1, balance1_before, &pool1_before);
+    assert_liquidity_unchanged(&client, &anchor, &asset2, balance2_before, &pool2_before);
 }
 
 /// Regression test: an invalid entry (non-positive amount) appearing *later* in
@@ -5209,27 +5234,19 @@ fn test_provide_liquidity_multi_zero_mutations_on_late_duplicate_failure() {
 #[test]
 fn test_provide_liquidity_multi_zero_mutations_on_late_nonpositive_failure() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = setup(&env);
-    let anchor = Address::generate(&env);
     let asset1 = symbol_short!("AST1");
     let asset2 = symbol_short!("AST2");
     let asset3 = symbol_short!("AST3");
+    let (client, anchor) =
+        funded_multi_asset_pools(&env, &[asset1.clone(), asset2.clone(), asset3.clone()]);
 
-    client.initialize(&admin);
-    client.register_anchor(&anchor);
-
-    // Snapshot balances and pool totals for every affected asset before the
-    // call. All are zero since no liquidity has been provided yet.
-    let bal1_before = client.balance(&anchor, &asset1);
-    let bal2_before = client.balance(&anchor, &asset2);
-    let bal3_before = client.balance(&anchor, &asset3);
-    let total1_before = client.total_liquidity(&asset1);
-    let total2_before = client.total_liquidity(&asset2);
-    let total3_before = client.total_liquidity(&asset3);
-    let providers1_before = client.pool(&asset1).providers;
-    let providers2_before = client.pool(&asset2).providers;
-    let providers3_before = client.pool(&asset3).providers;
+    // Snapshot every accounting field for every distinct asset in the batch.
+    let balance1_before = client.balance(&anchor, &asset1);
+    let balance2_before = client.balance(&anchor, &asset2);
+    let balance3_before = client.balance(&anchor, &asset3);
+    let pool1_before = client.pool(&asset1);
+    let pool2_before = client.pool(&asset2);
+    let pool3_before = client.pool(&asset3);
 
     // First two entries are valid distinct assets; third has a non-positive
     // amount — the invalid entry appears *after* valid ones.
@@ -5246,17 +5263,10 @@ fn test_provide_liquidity_multi_zero_mutations_on_late_nonpositive_failure() {
         .unwrap();
     assert_eq!(err, Error::InvalidAmount);
 
-    // Verify state unchanged for every asset in the batch — including the valid
-    // ones (asset1, asset2) that appeared before the invalid entry.
-    assert_eq!(client.balance(&anchor, &asset1), bal1_before);
-    assert_eq!(client.balance(&anchor, &asset2), bal2_before);
-    assert_eq!(client.balance(&anchor, &asset3), bal3_before);
-    assert_eq!(client.total_liquidity(&asset1), total1_before);
-    assert_eq!(client.total_liquidity(&asset2), total2_before);
-    assert_eq!(client.total_liquidity(&asset3), total3_before);
-    assert_eq!(client.pool(&asset1).providers, providers1_before);
-    assert_eq!(client.pool(&asset2).providers, providers2_before);
-    assert_eq!(client.pool(&asset3).providers, providers3_before);
+    // The valid prefix and invalid final leg must leave all assets untouched.
+    assert_liquidity_unchanged(&client, &anchor, &asset1, balance1_before, &pool1_before);
+    assert_liquidity_unchanged(&client, &anchor, &asset2, balance2_before, &pool2_before);
+    assert_liquidity_unchanged(&client, &anchor, &asset3, balance3_before, &pool3_before);
 }
 
 #[test]
