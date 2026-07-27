@@ -64,6 +64,7 @@ state.
 | `withdraw_liquidity_multi(provider, requests)` | provider | Withdraw from several assets in one call and authorization; validates the whole batch (no duplicate assets) before applying any of it [...]
 | `deregister_anchor(anchor)` | admin | Remove an anchor from the approved set |
 | `pool(asset)` | – | Read aggregate pool state |
+| `pool_exists(asset)` | – | Check whether a pool entry exists for an asset (i.e. liquidity has ever been provided for it) |
 | `total_liquidity(asset)` | – | Read total liquidity for an asset |
 | `total_liquidity_all()` | – | Read the sum of total liquidity across every asset ever funded |
 | `balance(provider, asset)` | – | Read a provider's balance |

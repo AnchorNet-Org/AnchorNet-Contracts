@@ -6353,6 +6353,131 @@ fn test_reserved_liquidity_returns_zero_for_asset_with_only_non_pending() {
     assert_eq!(client.reserved_liquidity(&asset), 0);
 }
 
+// ---------------------------------------------------------------------------
+// pool_exists – boolean existence view for asset pools
+// ---------------------------------------------------------------------------
+
+/// `pool_exists` returns `false` before any liquidity has been provided for
+/// the asset — the pool entry does not exist yet.
+#[test]
+fn test_pool_exists_false_before_any_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+
+    assert!(!client.pool_exists(&asset));
+}
+
+/// `pool_exists` returns `true` once `provide_liquidity` has been called for
+/// the asset, and stays `true` even after a full withdrawal empties the pool.
+#[test]
+fn test_pool_exists_true_after_provide_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    assert!(!client.pool_exists(&asset), "must be false before any liquidity");
+
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    assert!(client.pool_exists(&asset), "must be true after provide_liquidity");
+}
+
+/// `pool_exists` returns `true` once `provide_liquidity_multi` has touched the
+/// asset, matching the same post-condition as the single-asset entrypoint.
+#[test]
+fn test_pool_exists_true_after_provide_liquidity_multi() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    assert!(!client.pool_exists(&usdc));
+    assert!(!client.pool_exists(&eurc));
+
+    client.provide_liquidity_multi(&anchor, &vec![&env, (usdc.clone(), 100), (eurc.clone(), 200)]);
+
+    assert!(client.pool_exists(&usdc));
+    assert!(client.pool_exists(&eurc));
+}
+
+/// `pool_exists` remains `true` after a full withdrawal: the pool entry persists
+/// even when `total == 0`, because assets are never removed from enumeration.
+#[test]
+fn test_pool_exists_true_after_full_withdrawal() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    assert!(client.pool_exists(&asset), "precondition: pool exists after funding");
+
+    client.withdraw_all_liquidity(&anchor, &asset);
+
+    assert_eq!(client.total_liquidity(&asset), 0, "pool drained");
+    assert!(
+        client.pool_exists(&asset),
+        "pool_exists must stay true after a full withdrawal — the entry persists",
+    );
+}
+
+/// `pool_exists` is independent per asset: funding one asset must not make
+/// another appear to exist.
+#[test]
+fn test_pool_exists_is_per_asset() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let usdc = symbol_short!("USDC");
+    let eurc = symbol_short!("EURC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &usdc, &500);
+
+    assert!(client.pool_exists(&usdc), "USDC was funded");
+    assert!(!client.pool_exists(&eurc), "EURC was never funded");
+}
+
+/// `pool_exists` is consistent with `pool()`: the latter errors with
+/// `PoolNotFound` exactly when `pool_exists` returns `false`, and succeeds
+/// exactly when `pool_exists` returns `true`.
+#[test]
+fn test_pool_exists_consistent_with_pool_getter() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // Before funding: pool_exists == false  ↔  pool() == PoolNotFound
+    assert!(!client.pool_exists(&asset));
+    assert_eq!(
+        client.try_pool(&asset).err().unwrap().unwrap(),
+        Error::PoolNotFound,
+    );
+
+    // After funding: pool_exists == true  ↔  pool() succeeds
+    client.provide_liquidity(&anchor, &asset, &1_000);
+    assert!(client.pool_exists(&asset));
+    assert_eq!(client.pool(&asset).total, 1_000);
+}
+
 // --- hello (smoke test that setup still works after all new tests) ---
 
 #[test]

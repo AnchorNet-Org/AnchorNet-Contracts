@@ -919,6 +919,18 @@ impl AnchornetContract {
         Ok(storage::get_pool(&env, &asset))
     }
 
+    /// Returns `true` if a pool entry exists for `asset`, i.e. liquidity has
+    /// ever been provided for it via [`provide_liquidity`](Self::provide_liquidity)
+    /// or [`provide_liquidity_multi`](Self::provide_liquidity_multi).
+    ///
+    /// This is a pure read view with no authorization requirement. It lets
+    /// off-chain integrators check for pool existence without catching an
+    /// error from [`pool`](Self::pool), mirroring the [`is_anchor`](Self::is_anchor)
+    /// pattern used for anchor membership.
+    pub fn pool_exists(env: Env, asset: Symbol) -> bool {
+        storage::has_pool(&env, &asset)
+    }
+
     /// Returns up to `limit` assets that have ever had liquidity provided, in
     /// first-use order, starting at list index `start` (0-based). Useful for
     /// discovering which assets to query via [`pool`](Self::pool) or
@@ -1488,7 +1500,7 @@ impl<'a> AnchornetContractClient<'a> {
     }
 
     /// Backward-compatible Rust client alias for the shorter
-    /// `list_settlements_by_anchor_asset` on-chain export.
+    /// `list_settlements_by_anch_asset` on-chain export.
     pub fn list_settlements_by_anchor_and_asset(
         &self,
         anchor: &Address,
@@ -1496,7 +1508,7 @@ impl<'a> AnchornetContractClient<'a> {
         start: &u64,
         limit: &u32,
     ) -> Vec<Settlement> {
-        self.list_settlements_by_anchor_asset(anchor, asset, start, limit)
+        self.list_settlements_by_anch_asset(anchor, asset, start, limit)
     }
 }
 
