@@ -289,6 +289,13 @@ impl AnchornetContract {
         Ok(())
     }
 
+    /// Returns `true` if `asset` has an explicit fee override configured,
+    /// distinguishing an admin-set `0` bps override from the absence of any
+    /// override that simply falls back to the global fee.
+    pub fn has_asset_fee_override(env: Env, asset: Symbol) -> bool {
+        storage::get_asset_fee(&env, &asset).is_some()
+    }
+
     /// Returns the effective protocol fee for `asset`, in basis points: its
     /// override if one is configured, otherwise the global fee.
     pub fn asset_fee(env: Env, asset: Symbol) -> u32 {

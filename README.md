@@ -10,18 +10,20 @@ Optional: Soroban CLI for deployment and local testing
 Setup
 Bash
 
-# Clone the repo (or use your fork)
+Clone the repo (or use your fork)
 git clone <repo-url>
 cd anchornet-contracts
 
-# Install Rust if needed
+Install Rust if needed
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Check formatting, build, and test
+Check formatting, build, and test
 cargo fmt --all -- --check
 cargo build
 cargo test
-```
+
+text
+
 
 ## Project structure
 
@@ -95,6 +97,7 @@ state.
 | `set_asset_fee(asset, bps)` | admin | Override the protocol fee for one asset, independent of the global rate |
 | `clear_asset_fee(asset)` | admin | Remove an asset's fee override, reverting it to the global rate |
 | `asset_fee(asset)` | – | Read the effective fee for an asset (its override, or the global rate) |
+| `has_asset_fee_override(asset)` | – | Read whether an explicit fee override is configured for `asset`, distinguishing an admin-set `0` bps override from the absence of any override |
 | `collect_fees(asset)` | admin | Collect accrued protocol fees for an asset |
 | `fees_accrued(asset)` | – | Read uncollected fees for an asset |
 | `total_fees_accrued()` | – | Read the sum of uncollected fees across every asset ever funded |
@@ -109,6 +112,9 @@ floor(amount * bps / 10_000). As a result, tiny settlements can have a
 zero fee even when the configured rate is nonzero. For example, at 1 bps,
 amounts below 10,000 quote and accrue a fee of 0, while an amount of 10,000
 produces a fee of 1. This rounding behavior is an accepted protocol tradeoff.
+
+### Fee override visibility
+`asset_fee(asset)` collapses the per-asset fee override into the effective rate (`Option<u32>` → `u32`), so it cannot distinguish an explicit `0` bps override (`set_asset_fee(asset, 0)`) from the absence of any override when the global fee is also `0`. `has_asset_fee_override(asset)` resolves this ambiguity by exposing whether the override entry exists in storage (`Some(_)`), independent of its value.
 
 Settlement
 Function	Auth	Description
