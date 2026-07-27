@@ -1650,6 +1650,58 @@ fn test_settlement_exists() {
 }
 
 #[test]
+fn test_settlement_status_pending() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id = client.open_settlement(&anchor, &asset, &100);
+
+    assert_eq!(client.settlement_status(&id), SettlementStatus::Pending);
+}
+
+#[test]
+fn test_settlement_status_executed() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_fee(&100); // 1%
+    let id = client.open_settlement(&anchor, &asset, &100);
+    client.execute_settlement(&id);
+
+    assert_eq!(client.settlement_status(&id), SettlementStatus::Executed);
+}
+
+#[test]
+fn test_settlement_status_cancelled() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    let id = client.open_settlement(&anchor, &asset, &100);
+    client.cancel_settlement(&id);
+
+    assert_eq!(client.settlement_status(&id), SettlementStatus::Cancelled);
+}
+
+#[test]
+fn test_settlement_status_expired() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+    client.set_settlement_expiry_ledgers(&10);
+    let id = client.open_settlement(&anchor, &asset, &100); // opened_at == 0
+
+    env.ledger().set_sequence_number(10);
+    client.cancel_expired_settlement(&id);
+
+    assert_eq!(client.settlement_status(&id), SettlementStatus::Expired);
+}
+
+#[test]
+fn test_settlement_status_not_found() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    let err = client.try_settlement_status(&99).err().unwrap().unwrap();
+    assert_eq!(err, Error::SettlementNotFound);
+}
+
+#[test]
 fn test_is_settlement_pending() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
@@ -6394,11 +6446,17 @@ fn test_pool_exists_true_after_provide_liquidity() {
     client.initialize(&admin);
     client.register_anchor(&anchor);
 
-    assert!(!client.pool_exists(&asset), "must be false before any liquidity");
+    assert!(
+        !client.pool_exists(&asset),
+        "must be false before any liquidity"
+    );
 
     client.provide_liquidity(&anchor, &asset, &1_000);
 
-    assert!(client.pool_exists(&asset), "must be true after provide_liquidity");
+    assert!(
+        client.pool_exists(&asset),
+        "must be true after provide_liquidity"
+    );
 }
 
 /// `pool_exists` returns `true` once `provide_liquidity_multi` has touched the
@@ -6418,7 +6476,10 @@ fn test_pool_exists_true_after_provide_liquidity_multi() {
     assert!(!client.pool_exists(&usdc));
     assert!(!client.pool_exists(&eurc));
 
-    client.provide_liquidity_multi(&anchor, &vec![&env, (usdc.clone(), 100), (eurc.clone(), 200)]);
+    client.provide_liquidity_multi(
+        &anchor,
+        &vec![&env, (usdc.clone(), 100), (eurc.clone(), 200)],
+    );
 
     assert!(client.pool_exists(&usdc));
     assert!(client.pool_exists(&eurc));
@@ -6431,7 +6492,10 @@ fn test_pool_exists_true_after_full_withdrawal() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);
 
-    assert!(client.pool_exists(&asset), "precondition: pool exists after funding");
+    assert!(
+        client.pool_exists(&asset),
+        "precondition: pool exists after funding"
+    );
 
     client.withdraw_all_liquidity(&anchor, &asset);
 
@@ -6924,8 +6988,10 @@ fn test_has_asset_fee_override_true_after_set_zero_bps() {
 
     // Explicit 0 bps override — distinct from no override.
     client.set_asset_fee(&asset, &0);
-    assert!(client.has_asset_fee_override(&asset),
-        "an explicit 0 bps override must be distinguishable from no override");
+    assert!(
+        client.has_asset_fee_override(&asset),
+        "an explicit 0 bps override must be distinguishable from no override"
+    );
     assert_eq!(client.asset_fee(&asset), 0);
 }
 
@@ -6955,7 +7021,9 @@ fn test_has_asset_fee_override_false_after_clear() {
     assert!(client.has_asset_fee_override(&asset));
 
     client.clear_asset_fee(&asset);
-    assert!(!client.has_asset_fee_override(&asset),
-        "clear_asset_fee must revert override visibility to false");
+    assert!(
+        !client.has_asset_fee_override(&asset),
+        "clear_asset_fee must revert override visibility to false"
+    );
     assert_eq!(client.asset_fee(&asset), 0); // falls back to global fee (0)
 }
