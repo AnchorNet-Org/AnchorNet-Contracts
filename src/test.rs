@@ -4270,6 +4270,31 @@ fn test_max_settlement_amount_cap_is_per_asset() {
 }
 
 #[test]
+fn test_max_settlement_amount_zero_sentinel_disables_cap_after_previously_nonzero() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 10_000);
+
+    // Set a non-zero cap first.
+    client.set_max_settlement_amount(&asset, &500);
+
+    // With cap at 500, amounts above it are rejected.
+    let err = client
+        .try_open_settlement(&anchor, &asset, &600)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::AboveMaxSettlementAmount);
+
+    // Disable the cap by setting max_settlement_amount back to 0.
+    client.set_max_settlement_amount(&asset, &0);
+    assert_eq!(client.max_settlement_amount(&asset), 0);
+    assert!(client.is_max_settlement_amount_configured(&asset));
+
+    // The zero sentinel disables the cap — a large settlement now succeeds.
+    client.open_settlement(&anchor, &asset, &600);
+}
+
+#[test]
 fn test_asset_fee_falls_back_to_global_by_default() {
     let env = Env::default();
     let (client, _admin, _anchor, asset) = funded(&env, 1_000);
