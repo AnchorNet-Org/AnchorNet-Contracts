@@ -3515,6 +3515,126 @@ fn test_replacing_operator_revokes_prior_operator() {
 }
 
 #[test]
+fn test_operator_can_renounce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let operator = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_operator(&operator);
+
+    assert!(client.is_operator(&operator));
+
+    // Operator renounces — this is the self-service exit.
+    client.renounce_operator(&operator);
+
+    // Operator entry is cleared.
+    let err = client.try_operator().err().unwrap().unwrap();
+    assert_eq!(err, Error::NoOperator);
+    assert!(!client.is_operator(&operator));
+
+    // Former operator can no longer use operator-scoped entrypoints.
+    // `require_admin_or_operator` sees `has_operator = false`, so it
+    // returns a contract-level `NotAuthorized` *before* `require_auth()`.
+    let err = client.try_pause(&operator).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    let err = client.try_unpause(&operator).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+    let err = client
+        .try_extend_instance_ttl(&operator)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+
+    // Admin can still act unaffected.
+    client.pause(&admin);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_non_operator_cannot_renounce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let operator = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_operator(&operator);
+
+    // Scenario A: admin (not the operator) passes *own* address.
+    // `caller != operator` comparison fails → contract NotAuthorized.
+    let err = client.try_renounce_operator(&admin).err().unwrap().unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+
+    // Scenario B: a random stranger passes *own* address.
+    // Same branch: `caller != operator` → contract NotAuthorized.
+    let err = client
+        .try_renounce_operator(&stranger)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NotAuthorized);
+
+    // Operator can still renounce normally (sanity check — we haven't
+    // accidentally cleared the entry via the failed calls above).
+    assert!(client.is_operator(&operator));
+}
+
+#[test]
+fn test_admin_cannot_forge_renounce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let operator = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_operator(&operator);
+
+    // Admin passes the *operator's* address as `caller` while signing
+    // as admin.  The `caller == operator` comparison *passes*, letting
+    // execution reach `caller.require_auth()`.  The host checks the
+    // cryptographic signer behind the `Address` value — and rejects
+    // because admin does not control the operator's key.
+    //
+    // `assert_operator_rejected!` overrides mock_all_auths for this
+    // single call by calling `env.set_auths()` with only `admin`
+    // authorized, so `operator.require_auth()` cannot succeed.
+    assert_operator_rejected!(
+        env,
+        client,
+        admin,
+        "renounce_operator",
+        (operator.clone(),),
+        client.try_renounce_operator(&operator)
+    );
+
+    // Operator entry remains intact.
+    assert!(client.is_operator(&operator));
+}
+
+#[test]
+fn test_renounce_with_no_operator_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    let err = client.try_renounce_operator(&admin).err().unwrap().unwrap();
+    assert_eq!(err, Error::NoOperator);
+
+    // Also succeeds when addressed by a stranger (the function doesn't
+    // care *who* calls when no operator is set — it just checks whether
+    // an operator exists).
+    let stranger = Address::generate(&env);
+    let err = client
+        .try_renounce_operator(&stranger)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, Error::NoOperator);
+}
+
+#[test]
 fn test_min_liquidity_disabled_by_default() {
     let env = Env::default();
     let (client, _admin, anchor, asset) = funded(&env, 1_000);

@@ -462,7 +462,7 @@ data = Address { account_id: "..." }
 
 ---
 
-### 23. **op_clear** — Operator Role Revoked
+### 23. **op_clear** — Operator Role Revoked (Admin-Initiated)
 
 | Property | Value |
 |----------|-------|
@@ -471,11 +471,32 @@ data = Address { account_id: "..." }
 | **Emitted by** | [`clear_operator`](../src/lib.rs#L139) |
 | **Emitted from** | [`operator_cleared`](../src/events.rs#L153) |
 
-Emitted when the operator role is revoked, returning the contract to an operator-less state.
+Emitted when the operator role is revoked by the admin, returning the contract to an operator-less state.
 
 **Raw Event Example:**
 ```rust
 topics = ("op_clear",)
+data = ()
+```
+
+---
+
+### 24. **renounce** — Operator Renounced (Self-Initiated)
+
+| Property | Value |
+|----------|-------|
+| **Topics** | `("renounce",)` |
+| **Data** | `()` (unit) |
+| **Emitted by** | [`renounce_operator`](../src/lib.rs#L...) |
+| **Emitted from** | [`operator_renounced`](../src/events.rs#L...) |
+
+Emitted when the current operator voluntarily steps down without admin involvement.
+Off-chain systems can distinguish this self-initiated exit from an admin-initiated
+removal (topic `("op_clear",)`) via the different topic.
+
+**Raw Event Example:**
+```rust
+topics = ("renounce",)
 data = ()
 ```
 

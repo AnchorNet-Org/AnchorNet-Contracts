@@ -37,6 +37,7 @@ set_admin	Admin	("admin",) / new_admin	events::admin_changed	Transfers administr
 propose_admin	Admin	("propose",) / candidate	events::admin_proposed	Proposes candidate as the next administrator (step 1 of two-step transfer).
 accept_admin	Candidate	("admin",) / candidate	events::admin_changed	Accepts the pending administrator role (step 2 of two-step transfer).
 set_operator	Admin	("operator",) / operator	events::operator_changed	Appoints or replaces the contract Operator.
+renounce_operator	Operator (self)	("renounce",) / ()	events::operator_renounced	Operator voluntarily steps down without admin involvement. Admin cannot renounce on the operator's behalf.
 pause	Admin or Operator	("paused",) / true	events::paused_changed	Pauses contract mutations (deposits, withdrawals, opening settlements, etc.).
 unpause	Admin or Operator	("paused",) / false	events::paused_changed	Resumes normal contract operations.
 extend_instance_ttl	Admin or Operator	None	None	Extends the contract instance and WASM code TTL.

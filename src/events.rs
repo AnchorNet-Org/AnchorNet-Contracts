@@ -160,6 +160,16 @@ pub fn operator_cleared(env: &Env) {
     env.events().publish((symbol_short!("op_clear"),), ());
 }
 
+/// Emitted when the operator voluntarily renounces the role (self-service
+/// exit via [`renounce_operator`]). Topics: `("renounce",)`.
+///
+/// Off-chain systems can distinguish an admin-initiated removal
+/// ([`operator_cleared`], topic `("op_clear",)`) from a self-initiated one
+/// via the different topic.
+pub fn operator_renounced(env: &Env) {
+    env.events().publish((symbol_short!("renounce"),), ());
+}
+
 /// Emitted when an asset's maximum settlement amount changes. Topics:
 /// `("maxamt", asset)`, data: `i128` amount.
 pub fn max_settlement_amount_changed(env: &Env, asset: &Symbol, amount: i128) {
