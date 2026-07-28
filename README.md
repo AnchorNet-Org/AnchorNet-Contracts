@@ -169,6 +169,87 @@ carries no ability to change the fee, the admin, or any other admin-only
 setting. Note that appointing the admin as its own operator is a supported
 (if redundant) dual-role configuration.
 
+### Storage & TTL
+
+The contract uses Soroban's two storage buckets with independent TTL (time to
+live) policies:
+
+**Instance storage** (`env.storage().instance()`) holds small, contract-wide
+singleton configuration tightly coupled to the contract code entry. These
+entries are not subject to per-key TTL extensions and are expected to persist
+as long as the contract itself does.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `Admin` | `Address` | Contract administrator |
+| `PendingAdmin` | `Address` | Proposed next administrator (optional) |
+| `Operator` | `Address` | Appointed pause/unpause delegate (optional) |
+| `Paused` | `bool` | Whether mutations are halted |
+| `FeeBps` | `u32` | Global protocol fee rate |
+| `SettlementCount` | `u64` | Monotonic settlement-id counter |
+| `SettlementExpiryLedgers` | `u32` | Settlement expiry window in ledgers |
+
+**Persistent storage** (`env.storage().persistent()`) stores per-key data
+that can be archived and restored independently. Every persistent entry is
+automatically extended on each read or write using the contract's TTL bump
+policy.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `Anchor(Address)` | `bool` | Anchor registration flag |
+| `Pool(Symbol)` | `Pool` | Per-asset liquidity aggregate (total, providers) |
+| `Balance(Address, Symbol)` | `i128` | Provider's liquidity balance per asset |
+| `Settlement(u64)` | `Settlement` | Settlement record by id |
+| `FeesAccrued(Symbol)` | `i128` | Uncollected protocol fees per asset |
+| `WaivedFeeVolume(Symbol)` | `i128` | Forgone fee revenue due to waivers per asset |
+| `AnchorList` | `Vec<Address>` | Append-only registration history |
+| `AssetList` | `Vec<Symbol>` | Append-only first-use asset list |
+| `FeeWaiver(Address)` | `bool` | Fee-waiver flag per anchor |
+| `MinLiquidity(Symbol)` | `i128` | Withdrawal floor per asset |
+| `MaxSettlementAmount(Symbol)` | `i128` | Per-settlement cap per asset |
+| `AssetFee(Symbol)` | `u32` | Per-asset fee override (optional) |
+
+**TTL parameters:**
+
+- `DAY_IN_LEDGERS = 17,280` — one stellar ledger day (~5 seconds per ledger)
+- `BUMP_AMOUNT = 30 * DAY_IN_LEDGERS` — entries are extended to ~30 days
+  on every access (`set_pool`, `get_pool`, `set_settlement`, `get_settlement`,
+  etc.)
+- `LIFETIME_THRESHOLD = BUMP_AMOUNT - DAY_IN_LEDGERS` — extension fires once
+  the remaining lifetime drops below ~29 days
+
+This means a Pool or Settlement entry that is actively read or written
+(e.g. by liquidity provision, settlement opening, or querying) has its TTL
+refreshed to ~30 days from each access. Entries that are never touched
+again — a Pool whose asset has been drained of all liquidity, or a terminal
+Settlement that has been Executed, Cancelled, or Expired — will eventually
+archive once their TTL elapses (~30 days after the last access), at which
+point the entry disappears from on-chain storage and a subsequent read
+returns the default (empty Pool / `None` settlement). The storage accessors
+in `src/storage.rs` handle the fallback uniformly.
+
+**`extend_instance_ttl` only refreshes the instance bucket.** It has no
+effect on any persistent entry. Pool and Settlement entries rely on their
+own per-key `extend` calls, which are triggered naturally by read/write
+traffic. Read-only operational queries (`pool`, `settlement`,
+`total_liquidity`, `max_settlement_amount`, `min_liquidity`, `is_fee_waived`,
+`asset_fee`, etc.) all extend the TTL of the entry they read, so that
+heavily-queried but rarely-updated risk configuration does not silently
+archive between admin rewrites (see issue #122 and the `has`-guarded
+extenders in `src/storage.rs`).
+
+In practice this means:
+- **`Pool(asset)`** — stays alive as long as liquidity is actively provided
+  or withdrawn, or as long as anyone queries it. An abandoned pool entry
+  expires ~30 days after its last access.
+- **`Settlement(id)`** — stays alive while the settlement is being actively
+  queried or transitioned (open, execute, cancel, expire). Finalized
+  settlements that are never queried again eventually expire from storage,
+  but the settlement id counter and aggregate views (`settlement_count`,
+  `total_settled_amount`, etc.) in instance storage remain accurate.
+- **`Balance(provider, asset)`** — stays alive while the provider remains
+  active or their balance is queried.
+
 Operator permission boundary
 The table below lists every gated entrypoint and which guard function
 it calls in src/lib.rs, so integrators and delegates can
