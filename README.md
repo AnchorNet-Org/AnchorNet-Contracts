@@ -85,6 +85,7 @@ state.
 | `pause(caller)` / `unpause(caller)` | admin or operator | Halt or resume liquidity & settlement mutations |
 | `set_operator(operator)` | admin | Appoint an operator that may pause/unpause but cannot change fees or admin |
 | `clear_operator()` | admin | Revoke the operator role entirely |
+| `renounce_operator(caller)` | operator (self) | Operator voluntarily steps down without admin involvement |
 | `operator()` | – | Read the currently appointed operator |
 | `is_operator(address)` | – | Check whether an address is the currently appointed operator |
 | `extend_instance_ttl(caller)` | admin or operator | Extend the contract instance/code TTL so it survives long inactivity |
@@ -267,6 +268,9 @@ Entrypoint	Description
 set_admin(new_admin)	Transfer administration (single-step)
 propose_admin(candidate)	Initiate a two-step admin transfer
 set_operator(operator)	Appoint or replace the operator
+renounce_operator(caller)	Self-service operator exit (caller must be the operator, not admin)
+
+Note: `renounce_operator` is gated by a custom check (not `require_admin` or `require_admin_or_operator`): the caller must be the current operator and provide their own authorization. The admin cannot renounce on the operator's behalf.
 register_anchor(anchor)	Approve a new liquidity provider
 register_anchors(anchors)	Batch-approve liquidity providers
 deregister_anchor(anchor)	Remove an anchor from the approved set

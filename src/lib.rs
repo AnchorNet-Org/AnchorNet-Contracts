@@ -164,6 +164,30 @@ impl AnchornetContract {
         Ok(())
     }
 
+    /// Lets the current operator voluntarily step down without admin
+    /// involvement. Useful for key rotation or when the delegate no longer
+    /// wants standing pause/unpause authority.
+    ///
+    /// Returns [`Error::NoOperator`] when no operator is appointed, and
+    /// [`Error::NotAuthorized`] if `caller` is not the current operator.
+    ///
+    /// Emits a [`("renounce",)`](crate::events::operator_renounced) event
+    /// distinct from the `("op_clear",)` event emitted by the admin-initiated
+    /// [`clear_operator`](Self::clear_operator), so off-chain systems can
+    /// distinguish the two removal paths.
+    pub fn renounce_operator(env: Env, caller: Address) -> Result<(), Error> {
+        if !storage::has_operator(&env) {
+            return Err(Error::NoOperator);
+        }
+        if caller != storage::get_operator(&env) {
+            return Err(Error::NotAuthorized);
+        }
+        caller.require_auth();
+        storage::clear_operator(&env);
+        events::operator_renounced(&env);
+        Ok(())
+    }
+
     /// Returns the currently appointed operator, or [`Error::NoOperator`] if
     /// none has been appointed.
     pub fn operator(env: Env) -> Result<Address, Error> {
