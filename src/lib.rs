@@ -241,9 +241,7 @@ impl AnchornetContract {
     /// Sets the protocol fee in basis points (max 1000 = 10%). Admin only.
     pub fn set_fee(env: Env, bps: u32) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        if bps > MAX_FEE_BPS {
-            return Err(Error::InvalidFee);
-        }
+        Self::require_valid_fee(bps)?;
         storage::set_fee_bps(&env, bps);
         events::fee_changed(&env, bps);
         Ok(())
@@ -296,9 +294,7 @@ impl AnchornetContract {
     /// [`set_fee`](Self::set_fee). Admin only.
     pub fn set_asset_fee(env: Env, asset: Symbol, bps: u32) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        if bps > MAX_FEE_BPS {
-            return Err(Error::InvalidFee);
-        }
+        Self::require_valid_fee(bps)?;
         storage::set_asset_fee(&env, &asset, bps);
         events::asset_fee_changed(&env, &asset, bps);
         Ok(())
@@ -1431,6 +1427,14 @@ impl AnchornetContract {
         }
         let admin = storage::get_admin(env);
         admin.require_auth();
+        Ok(())
+    }
+
+    /// Requires the fee to be within the allowed protocol limits.
+    fn require_valid_fee(bps: u32) -> Result<(), Error> {
+        if bps > MAX_FEE_BPS {
+            return Err(Error::InvalidFee);
+        }
         Ok(())
     }
 
