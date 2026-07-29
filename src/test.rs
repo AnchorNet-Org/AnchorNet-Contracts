@@ -4443,12 +4443,24 @@ fn test_set_asset_fee_rejects_above_cap() {
     let (client, _admin, _anchor, asset) = funded(&env, 1_000);
 
     let err = client
-        .try_set_asset_fee(&asset, &1_001)
+        .try_set_asset_fee(&asset, &(client.max_fee_bps() + 1))
         .err()
         .unwrap()
         .unwrap();
     assert_eq!(err, Error::InvalidFee);
 }
+
+#[test]
+fn test_set_asset_fee_accepts_boundary() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    let max_fee = client.max_fee_bps();
+    client.set_asset_fee(&asset, &max_fee);
+    
+    assert_eq!(client.asset_fee(&asset), max_fee);
+}
+
 
 #[test]
 fn test_clear_asset_fee_reverts_to_global() {
