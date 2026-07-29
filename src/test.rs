@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::storage::DataKey;
 use crate::{
     AnchorStatus, AnchornetContract, AnchornetContractClient, Error, Pool, SettlementStatus,
@@ -1188,7 +1189,7 @@ proptest! {
         let mut expected_total: i128 = 0;
         let mut balances = [[0i128; 2]; 2];
         let mut pool_totals = [0i128; 2];
-        let mut settlements: Vec<SettlementState> = Vec::new();
+        let mut settlements: alloc::vec::Vec<SettlementState> = Vec::new();
         let mut ledger_seq: u32 = 100;
 
         env.ledger().set_sequence_number(ledger_seq);
@@ -6264,7 +6265,7 @@ proptest! {
         client.set_fee(&50);
         client.set_settlement_expiry_ledgers(&10_000);
 
-        let mut ops: Vec<(u64, u32)> = Vec::new();
+        let mut ops: alloc::vec::Vec<(u64, u32)> = Vec::new();
 
         for (ai, si, amount, action) in plan {
             let anchor = &anchrs[ai as usize % anchrs.len()];
@@ -7183,4 +7184,49 @@ fn test_has_asset_fee_override_false_after_clear() {
         "clear_asset_fee must revert override visibility to false"
     );
     assert_eq!(client.asset_fee(&asset), 0); // falls back to global fee (0)
+}
+
+#[test]
+fn test_settlement_count_and_list_consistency() {
+    let env = Env::default();
+    let (client, admin, anchor, asset) = funded(&env, 10_000);
+    client.set_fee(&100);
+    
+    // Create settlements in all states
+    let s1 = client.open_settlement(&anchor, &asset, &100); // Pending
+    let s2 = client.open_settlement(&anchor, &asset, &100); // Pending -> Executed
+    let s3 = client.open_settlement(&anchor, &asset, &100); // Pending -> Cancelled
+    let s4 = client.open_settlement(&anchor, &asset, &100); // Pending -> Expired
+    
+    client.execute_settlement(&s2);
+    client.cancel_settlement(&s3);
+    
+    // For expired, we need to advance the ledger
+    client.set_settlement_expiry_ledgers(&10);
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 11;
+    });
+    client.cancel_expired_settlement(&s4);
+    
+    let statuses = [
+        SettlementStatus::Pending,
+        SettlementStatus::Executed,
+        SettlementStatus::Cancelled,
+        SettlementStatus::Expired,
+    ];
+    
+    for status in statuses.iter() {
+        let count = client.settlement_count_by_status(status);
+        let list = client.list_settlements_by_status(status, &0, &u32::MAX);
+        assert_eq!(count, list.len() as u64, "Mismatch for status {:?}", status);
+    }
+    
+    // Mutate state again to test at a different lifecycle point
+    client.execute_settlement(&s1); // Now s1 is Executed
+    
+    for status in statuses.iter() {
+        let count = client.settlement_count_by_status(status);
+        let list = client.list_settlements_by_status(status, &0, &u32::MAX);
+        assert_eq!(count, list.len() as u64, "Mismatch for status {:?} after mutation", status);
+    }
 }
