@@ -7230,3 +7230,191 @@ fn test_settlement_count_and_list_consistency() {
         assert_eq!(count, list.len() as u64, "Mismatch for status {:?} after mutation", status);
     }
 }
+
+/// Tracks a single settlement's state within the id-monotonicity proptest.
+#[derive(Clone)]
+struct IdMonotonicSettlement {
+    id: u64,
+    anchor_idx: usize,
+    asset_idx: usize,
+    amount: i128,
+    opened_at: u32,
+    status: SettlementStatus,
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Verifies that settlement IDs are strictly monotonic and gapless
+    /// (1, 2, 3, ...) regardless of how many settlements are subsequently
+    /// executed, cancelled, or expired.
+    ///
+    /// Generates a randomized sequence of settlement lifecycle operations
+    /// across multiple assets and anchors, interleaving `open_settlement`
+    /// with `execute_settlement`, `cancel_settlement`, and
+    /// `cancel_expired_settlement` calls. Tracks every id returned by
+    /// `open_settlement` and asserts the sequence is exactly 1, 2, 3, ...
+    /// with no gaps or repeats, independent of lifecycle status changes.
+    ///
+    /// Additionally asserts that `settlement_count()` always equals the
+    /// number of successful `open_settlement` calls made so far — never
+    /// more (e.g. from a double-increment race) or less (e.g. from a
+    /// failed persist after assigning the id).
+    ///
+    /// A gap or repeat in settlement ids would break every id-keyed
+    /// off-chain index and could, in the worst case, let two distinct
+    /// settlements collide on the same id — this property test is cheap
+    /// insurance against that class of bug given the counter's simple but
+    /// easy-to-regress increment-then-persist pattern.
+    #[test]
+    fn prop_settlement_ids_monotonic_and_gapless(
+        ops in prop::collection::vec(
+            (0..4u32, 0..2u32, 0..2u32, 1..=10_000i128),
+            1..=200,
+        ),
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let assets = [symbol_short!("USDC"), symbol_short!("EURC")];
+        let anchors = [
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+
+        client.initialize(&admin);
+        for anchor in &anchors {
+            client.register_anchor(anchor);
+        }
+        // Seed each pool with ample liquidity so opens rarely hit
+        // InsufficientLiquidity.
+        let seed = Address::generate(&env);
+        client.register_anchor(&seed);
+        for asset in &assets {
+            client.provide_liquidity(&seed, asset, &10_000_000);
+        }
+        // Short expiry so cancel_expired_settlement is reachable.
+        client.set_settlement_expiry_ledgers(&10);
+
+        // Expected next id, starts at 1.
+        let mut expected_next_id: u64 = 1;
+        // Number of successful open_settlement calls.
+        let mut open_count: u64 = 0;
+        // Local mirror of on-chain settlement state.
+        let mut settlements: alloc::vec::Vec<IdMonotonicSettlement> = Vec::new();
+        let mut ledger_seq: u32 = 100;
+
+        env.ledger().set_sequence_number(ledger_seq);
+
+        for (kind, anchor_idx, asset_idx, amount) in ops {
+            let (anchor_idx, asset_idx) = (anchor_idx as usize, asset_idx as usize);
+
+            match kind % 4 {
+                // open_settlement
+                0 => {
+                    if let Ok(Ok(id)) =
+                        client.try_open_settlement(&anchors[anchor_idx], &assets[asset_idx], &amount)
+                    {
+                        prop_assert_eq!(
+                            id, expected_next_id,
+                            "id {} not monotonic; expected {} at open #{} (ledger {})",
+                            id, expected_next_id, open_count + 1, ledger_seq
+                        );
+                        expected_next_id = expected_next_id.checked_add(1).unwrap();
+                        open_count += 1;
+                        settlements.push(IdMonotonicSettlement {
+                            id,
+                            anchor_idx,
+                            asset_idx,
+                            amount,
+                            opened_at: ledger_seq,
+                            status: SettlementStatus::Pending,
+                        });
+                    }
+                }
+                // execute_settlement
+                1 => {
+                    let pending: alloc::vec::Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !pending.is_empty() {
+                        let idx = pending[(amount as usize) % pending.len()];
+                        let id = settlements[idx].id;
+                        if let Ok(Ok(())) = client.try_execute_settlement(&id) {
+                            settlements[idx].status = SettlementStatus::Executed;
+                        }
+                    }
+                }
+                // cancel_settlement
+                2 => {
+                    let pending: alloc::vec::Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| s.status == SettlementStatus::Pending)
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !pending.is_empty() {
+                        let idx = pending[(amount as usize) % pending.len()];
+                        let id = settlements[idx].id;
+                        if let Ok(Ok(())) = client.try_cancel_settlement(&id) {
+                            settlements[idx].status = SettlementStatus::Cancelled;
+                        }
+                    }
+                }
+                // cancel_expired_settlement
+                _ => {
+                    let expired: alloc::vec::Vec<usize> = settlements.iter().enumerate()
+                        .filter(|(_, s)| {
+                            s.status == SettlementStatus::Pending
+                                && ledger_seq >= s.opened_at + 10
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !expired.is_empty() {
+                        let idx = expired[(amount as usize) % expired.len()];
+                        let id = settlements[idx].id;
+                        if let Ok(Ok(())) = client.try_cancel_expired_settlement(&id) {
+                            settlements[idx].status = SettlementStatus::Expired;
+                        }
+                    }
+                }
+            }
+
+            // After every operation, settlement_count must match the
+            // number of open_settlement calls made, regardless of how
+            // many settlements were subsequently executed/cancelled/expired.
+            prop_assert_eq!(
+                client.settlement_count(),
+                open_count,
+                "settlement_count {} != open_count {} at ledger {}",
+                client.settlement_count(),
+                open_count,
+                ledger_seq
+            );
+
+            ledger_seq += 1;
+            env.ledger().set_sequence_number(ledger_seq);
+        }
+
+        // Final check: the last id assigned must equal the total count.
+        prop_assert_eq!(
+            expected_next_id - 1,
+            open_count,
+            "final next_id-1 {} != open_count {}",
+            expected_next_id - 1,
+            open_count
+        );
+
+        // Verify that every id from 1..=open_count exists as a
+        // settlement on-chain.
+        for id in 1..=open_count {
+            prop_assert!(
+                client.settlement_exists(&id),
+                "settlement id {} should exist but settlement_exists returned false",
+                id
+            );
+        }
+    }
+}
