@@ -1537,6 +1537,9 @@ impl AnchornetContract {
         storage::set_balance(env, provider, asset, remaining);
 
         events::liquidity_withdrawn(env, provider, asset, amount);
+        if remaining == 0 {
+            events::provider_exited(env, provider, asset);
+        }
         Ok(())
     }
 }

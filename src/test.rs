@@ -1,9 +1,9 @@
-use alloc::vec::Vec;
 use crate::storage::DataKey;
 use crate::{
     AnchorStatus, AnchornetContract, AnchornetContractClient, Error, Pool, SettlementStatus,
     BPS_DENOMINATOR,
 };
+use alloc::vec::Vec;
 use proptest::prelude::*;
 use soroban_sdk::{
     symbol_short,
@@ -3794,6 +3794,10 @@ fn test_withdraw_event_parity() {
     let events_all = env.events().all();
 
     assert_eq!(amount, 1_000);
+    // A full exit emits ("withdraw", …) followed immediately by ("exited", …).
+    // Both entrypoints share the same do_withdraw path, so this sequence is
+    // guaranteed to be identical whether withdraw_liquidity or
+    // withdraw_all_liquidity is called.
     assert_eq!(
         events_all,
         vec![
@@ -3802,6 +3806,11 @@ fn test_withdraw_event_parity() {
                 client.address.clone(),
                 (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
                 amount.into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("exited"), anchor.clone(), asset.clone()).into_val(&env),
+                ().into_val(&env),
             ),
         ],
         "withdraw_all_liquidity must emit the same event shape as withdraw_liquidity \
@@ -3824,6 +3833,8 @@ fn test_withdraw_liquidity_event_shape_matches_withdraw_all() {
     client.withdraw_liquidity(&anchor, &asset, &1_000);
     let events_all = env.events().all();
 
+    // A full exit emits ("withdraw", …) then ("exited", …); both entrypoints
+    // route through do_withdraw so the sequence is identical.
     assert_eq!(
         events_all,
         vec![
@@ -3833,10 +3844,139 @@ fn test_withdraw_liquidity_event_shape_matches_withdraw_all() {
                 (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
                 1_000i128.into_val(&env),
             ),
+            (
+                client.address.clone(),
+                (symbol_short!("exited"), anchor.clone(), asset.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
         ],
         "withdraw_liquidity with the full balance must emit the same event shape \
          as withdraw_all_liquidity for an equivalent withdrawal"
     );
+}
+
+// ── provider_exited event ────────────────────────────────────────────────────
+
+/// A full withdrawal (remaining balance == 0) emits both `("withdraw", …)` and
+/// `("exited", …)` in that order. The `("exited", …)` topic is the dedicated
+/// signal for off-chain indexers tracking active-provider counts.
+#[test]
+fn test_provider_exited_event_fires_on_full_exit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Withdraw the full balance in one call; capture events from that call only.
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+    let events = env.events().all();
+
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                1_000i128.into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("exited"), anchor.clone(), asset.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ],
+        "a full exit must emit withdraw then exited"
+    );
+    // The provider's balance and pool provider count must both reflect the exit.
+    assert_eq!(client.balance(&anchor, &asset), 0);
+    assert_eq!(client.pool(&asset).providers, 0);
+}
+
+/// A partial withdrawal (remaining balance > 0) emits only `("withdraw", …)`.
+/// The `("exited", …)` event must NOT fire when any balance remains.
+#[test]
+fn test_provider_exited_event_does_not_fire_on_partial_withdrawal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+    client.provide_liquidity(&anchor, &asset, &1_000);
+
+    // Withdraw only part of the balance; 400 remains.
+    client.withdraw_liquidity(&anchor, &asset, &600);
+    let events = env.events().all();
+
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                600i128.into_val(&env),
+            ),
+        ],
+        "a partial withdrawal must emit only withdraw, never exited"
+    );
+    // Provider is still counted in the pool.
+    assert_eq!(client.balance(&anchor, &asset), 400);
+    assert_eq!(client.pool(&asset).providers, 1);
+}
+
+/// After a full exit a provider may re-enter the pool and exit again. Each
+/// full exit must fire `("exited", …)` exactly once, confirming the event
+/// is not a one-shot guard but fires on every full exit.
+#[test]
+fn test_provider_exited_event_fires_again_after_re_entry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let anchor = Address::generate(&env);
+    let asset = symbol_short!("USDC");
+
+    client.initialize(&admin);
+    client.register_anchor(&anchor);
+
+    // --- first entry + exit ---
+    client.provide_liquidity(&anchor, &asset, &1_000);
+    client.withdraw_liquidity(&anchor, &asset, &1_000);
+
+    // --- re-enter ---
+    client.provide_liquidity(&anchor, &asset, &500);
+
+    // --- second exit: capture events from this withdrawal only ---
+    client.withdraw_liquidity(&anchor, &asset, &500);
+    let events = env.events().all();
+
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("withdraw"), anchor.clone(), asset.clone()).into_val(&env),
+                500i128.into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (symbol_short!("exited"), anchor.clone(), asset.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ],
+        "re-entering and fully exiting a pool must fire exited a second time"
+    );
+    assert_eq!(client.balance(&anchor, &asset), 0);
+    assert_eq!(client.pool(&asset).providers, 0);
 }
 
 #[test]
@@ -4458,10 +4598,9 @@ fn test_set_asset_fee_accepts_boundary() {
 
     let max_fee = client.max_fee_bps();
     client.set_asset_fee(&asset, &max_fee);
-    
+
     assert_eq!(client.asset_fee(&asset), max_fee);
 }
-
 
 #[test]
 fn test_clear_asset_fee_reverts_to_global() {
@@ -7191,43 +7330,48 @@ fn test_settlement_count_and_list_consistency() {
     let env = Env::default();
     let (client, admin, anchor, asset) = funded(&env, 10_000);
     client.set_fee(&100);
-    
+
     // Create settlements in all states
     let s1 = client.open_settlement(&anchor, &asset, &100); // Pending
     let s2 = client.open_settlement(&anchor, &asset, &100); // Pending -> Executed
     let s3 = client.open_settlement(&anchor, &asset, &100); // Pending -> Cancelled
     let s4 = client.open_settlement(&anchor, &asset, &100); // Pending -> Expired
-    
+
     client.execute_settlement(&s2);
     client.cancel_settlement(&s3);
-    
+
     // For expired, we need to advance the ledger
     client.set_settlement_expiry_ledgers(&10);
     env.ledger().with_mut(|li| {
         li.sequence_number += 11;
     });
     client.cancel_expired_settlement(&s4);
-    
+
     let statuses = [
         SettlementStatus::Pending,
         SettlementStatus::Executed,
         SettlementStatus::Cancelled,
         SettlementStatus::Expired,
     ];
-    
+
     for status in statuses.iter() {
         let count = client.settlement_count_by_status(status);
         let list = client.list_settlements_by_status(status, &0, &u32::MAX);
         assert_eq!(count, list.len() as u64, "Mismatch for status {:?}", status);
     }
-    
+
     // Mutate state again to test at a different lifecycle point
     client.execute_settlement(&s1); // Now s1 is Executed
-    
+
     for status in statuses.iter() {
         let count = client.settlement_count_by_status(status);
         let list = client.list_settlements_by_status(status, &0, &u32::MAX);
-        assert_eq!(count, list.len() as u64, "Mismatch for status {:?} after mutation", status);
+        assert_eq!(
+            count,
+            list.len() as u64,
+            "Mismatch for status {:?} after mutation",
+            status
+        );
     }
 }
 

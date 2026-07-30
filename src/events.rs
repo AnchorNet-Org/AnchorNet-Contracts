@@ -79,6 +79,27 @@ pub fn liquidity_withdrawn(env: &Env, provider: &Address, asset: &Symbol, amount
     );
 }
 
+/// Emitted once when a provider's balance in `asset` reaches exactly zero via
+/// a withdrawal, i.e. the provider has fully exited this asset's pool and
+/// `pool.providers` has been decremented. Topics: `("exited", provider, asset)`.
+///
+/// This is the mirror image of [`asset_onboarded`]: `asset_onboarded` fires on
+/// the first-ever contribution to a pool, while `provider_exited` fires on the
+/// last unit withdrawn by a given provider. It complements the always-present
+/// `("withdraw", …)` event — which fires on every withdrawal regardless of size
+/// — by giving off-chain indexers a dedicated signal to decrement their
+/// active-provider count without having to compare balances before and after
+/// each withdrawal event.
+///
+/// The event fires *in addition to* [`liquidity_withdrawn`], not instead of it,
+/// so existing subscribers see no change to the events they already consume.
+pub fn provider_exited(env: &Env, provider: &Address, asset: &Symbol) {
+    env.events().publish(
+        (symbol_short!("exited"), provider.clone(), asset.clone()),
+        (),
+    );
+}
+
 /// Emitted when the paused flag changes. Topics: `("paused",)`, data: `bool`.
 pub fn paused_changed(env: &Env, paused: bool) {
     env.events().publish((symbol_short!("paused"),), paused);
