@@ -324,6 +324,7 @@ For detailed event documentation, including argument shapes, emission sites, and
 - `("provide", provider, asset)` – liquidity provided
 - `("onboarded", asset)` – first liquidity provision for a new asset
 - `("withdraw", provider, asset)` – liquidity withdrawn
+- `("exited", provider, asset)` – provider's balance reached zero (full exit); fires after `("withdraw", …)` on the same transaction, only when the remaining balance is exactly 0
 - `("paused",)` – paused flag flipped (data: `bool`)
 - `("fee",)` – fee rate changed (data: `u32` bps)
 - `("waiver", anchor)` – anchor fee waiver granted or revoked
