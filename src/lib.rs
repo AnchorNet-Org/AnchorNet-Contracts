@@ -577,6 +577,18 @@ impl AnchornetContract {
         storage::get_min_liquidity(&env, &asset)
     }
 
+    /// Returns `true` if a minimum liquidity floor has ever been configured
+    /// for `asset`, including an explicit zero floor that intentionally
+    /// disables the withdrawal check.
+    ///
+    /// This distinguishes a never-configured asset from one whose floor was
+    /// explicitly set to zero; both cases continue to make
+    /// [`min_liquidity`](Self::min_liquidity) return `0`, so off-chain
+    /// callers need this view to tell them apart.
+    pub fn is_min_liquidity_configured(env: Env, asset: Symbol) -> bool {
+        storage::has_min_liquidity(&env, &asset)
+    }
+
     /// Clears the minimum liquidity floor for `asset`, reverting to unset state.
     /// Admin only.
     pub fn clear_min_liquidity(env: Env, asset: Symbol) -> Result<(), Error> {
@@ -1302,6 +1314,26 @@ impl AnchornetContract {
             id += 1;
         }
         out
+    }
+
+    /// Returns the lowest id (which is also the oldest by `opened_at`, as ids
+    /// are assigned sequentially) among currently `Pending` settlements for
+    /// `asset`. Returns `None` if no pending settlement exists for the asset.
+    /// This is intended for off-chain keepers to find the oldest settlement
+    /// to check for expiration via
+    /// [`cancel_expired_settlement`](Self::cancel_expired_settlement).
+    pub fn oldest_pending_settlement_id(env: Env, asset: Symbol) -> Option<u64> {
+        let count = storage::get_settlement_count(&env);
+        let mut id = 1;
+        while id <= count {
+            if let Some(settlement) = storage::get_settlement(&env, id) {
+                if settlement.asset == asset && settlement.status == SettlementStatus::Pending {
+                    return Some(id);
+                }
+            }
+            id += 1;
+        }
+        None
     }
 
     /// Returns the accrued (uncollected) protocol fees for `asset`.

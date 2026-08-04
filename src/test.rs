@@ -1,3 +1,7 @@
+// The crate is `#![no_std]`, so the `alloc` crate must be linked explicitly
+// before the `use alloc::…` paths below (and throughout this module) resolve.
+extern crate alloc;
+
 use crate::storage::DataKey;
 use crate::{
     AnchorStatus, AnchornetContract, AnchornetContractClient, Error, Pool, SettlementStatus,
@@ -1048,15 +1052,19 @@ proptest! {
             client.set_fee_waiver(&anchor, &false);
         }
 
-        let expected_bps = if waived {
+        // Documents the expected precedence chain (waiver > override > global);
+        // the numeric fee itself is compared against `quote_fee` below.
+        let _expected_bps = if waived {
             0
         } else if override_bps.is_some() {
             override_bps.unwrap()
         } else {
             global_bps
         };
+        // The generated client unwraps the contract's `Result<i128, Error>`
+        // return, so `quote_fee` here yields an `i128` directly.
         let expected_fee = if amount > 0 {
-            client.quote_fee(&asset, &amount).unwrap_or(0)
+            client.quote_fee(&asset, &amount)
         } else {
             0
         };
@@ -1064,12 +1072,12 @@ proptest! {
         let settlement_fee = client.settlement(&id).fee;
         if waived {
             prop_assert_eq!(settlement_fee, 0);
-            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            prop_assert_eq!(client.quote_fee(&asset, &amount), expected_fee);
             client.execute_settlement(&id);
             prop_assert_eq!(client.fees_accrued(&asset), 0);
         } else {
             prop_assert_eq!(settlement_fee, expected_fee);
-            prop_assert_eq!(client.quote_fee(&asset, &amount).unwrap(), expected_fee);
+            prop_assert_eq!(client.quote_fee(&asset, &amount), expected_fee);
             let before = client.fees_accrued(&asset);
             client.execute_settlement(&id);
             prop_assert_eq!(client.fees_accrued(&asset) - before, expected_fee);
@@ -3231,7 +3239,11 @@ fn test_clear_operator() {
     assert_eq!(err, Error::NoOperator);
     assert!(!client.is_operator(&operator));
 
-    assert_operator_rejected!(
+    // After the operator role is revoked the former operator is neither admin
+    // nor operator, so `require_admin_or_operator` rejects *before* reaching
+    // `caller.require_auth()` — a contract-level NotAuthorized, not a host
+    // authorization failure (same shape as `test_operator_can_renounce`).
+    assert_caller_unauthorized!(
         env,
         client,
         operator,
@@ -3239,7 +3251,7 @@ fn test_clear_operator() {
         (),
         client.try_pause(&operator)
     );
-    assert_operator_rejected!(
+    assert_caller_unauthorized!(
         env,
         client,
         operator,
@@ -3247,7 +3259,7 @@ fn test_clear_operator() {
         (),
         client.try_unpause(&operator)
     );
-    assert_operator_rejected!(
+    assert_caller_unauthorized!(
         env,
         client,
         operator,
@@ -3255,6 +3267,10 @@ fn test_clear_operator() {
         (),
         client.try_extend_instance_ttl(&operator)
     );
+
+    // `set_auths` inside the assertions above replaced the blanket mock, so
+    // restore it before driving further admin-authorized calls.
+    env.mock_all_auths();
 
     // Admin can still act
     client.pause(&admin);
@@ -4427,20 +4443,27 @@ fn test_clear_max_settlement_amount() {
 
     client.clear_max_settlement_amount(&asset);
 
+    // `events().all()` reflects only the most recent top-level invocation, so
+    // capture the clear call's events immediately, before the storage probes
+    // below. `ContractEvents` compares against an exact event vector rather
+    // than exposing per-event accessors (see `test_set_max_settlement_amount_emits_event`).
+    let events = env.events().all();
+
     assert_eq!(client.max_settlement_amount(&asset), 0);
 
     let has_key_after = env.as_contract(&client.address, || env.storage().persistent().has(&key));
     assert!(!has_key_after);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
     assert_eq!(
-        last_event,
-        (
-            client.address.clone(),
-            (symbol_short!("maxamt"), asset.clone()).into_val(&env),
-            0_i128.into_val(&env),
-        )
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("maxamt"), asset.clone()).into_val(&env),
+                0_i128.into_val(&env),
+            ),
+        ]
     );
 }
 
@@ -4999,7 +5022,9 @@ fn test_settlement_count_by_status_counts_across_full_history() {
 
 #[test]
 fn test_status_pagination_partitions_settlement_history() {
-    use std::collections::HashSet;
+    // The crate is `#![no_std]`; `BTreeSet` provides the same set semantics
+    // (insert, intersection, iteration, collect) this test relies on.
+    use alloc::collections::BTreeSet as HashSet;
 
     // Deliberately smaller than any per-status set, to force multi-page
     // accumulation rather than a single page that happens to hold everything.
