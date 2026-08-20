@@ -1566,5 +1566,12 @@ impl<'a> AnchornetContractClient<'a> {
     }
 }
 
+// The crate is no_std; the test module pulls in alloc and std collections, so
+// both need linking explicitly for test builds.
+#[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
 #[cfg(test)]
 mod test;
