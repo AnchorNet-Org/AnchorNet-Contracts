@@ -45,7 +45,7 @@ Because the contracts serve as the core state and execution layer for off-chain 
 - [ ] **Snapshot & Property Tests:**
   - Have proptest regressions (`proptest-regressions/`) and snapshot tests (`test_snapshots/`) been verified or updated?
 - [ ] **Local Build & Test Run:**
-  - Has the contract been compiled (`cargo build`) and verified via `cargo test` and `cargo fmt --all -- --check`?
+  - Has the contract been compiled (`make build`) and verified via `make test` and `make fmt-check`?
 
 ---
 
