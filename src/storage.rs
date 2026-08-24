@@ -1,13 +1,15 @@
 //! Storage keys and typed accessors for the AnchorNet contract.
 //!
-//! All persistent entries use the `persistent` storage with a TTL that is
-//! extended on every read/write so that active pools are not archived.
+//! Every live entry — both persistent and instance — has its TTL refreshed by
+//! the typed accessors in this module, so business logic in `lib.rs` never has
+//! to remember to bump TTL itself.
 //!
 //! # Storage Buckets
 //!
-//! The contract uses two distinct Soroban storage buckets with independent TTL policies:
+//! The contract uses two distinct Soroban storage buckets, each with its own
+//! TTL policy:
 //!
-//! - **Instance storage** (`env.storage().instance()`): Holds small, contract‑wide singleton configuration that is tightly coupled to the contract's code entry. These entries are not subject to per‑key TTL extensions and are expected to persist as long as the contract itself does.
+//! - **Instance storage** (`env.storage().instance()`): Holds small, contract‑wide singleton configuration that is tightly coupled to the contract's code entry. The instance is a single archive unit: if it expires, *all* instance keys and the contract's Wasm entry expire together, bricking the contract until an explicit restore. Because that is the most severe failure mode, **every** instance accessor (read, write, and remove) refreshes the instance TTL via [`bump_instance`] using the shared threshold/bump constants. There is intentionally no per-key granularity at this layer.
 //!   - `Admin`
 //!   - `PendingAdmin`
 //!   - `Operator`
@@ -16,14 +18,25 @@
 //!   - `SettlementCount`
 //!   - `SettlementExpiryLedgers`
 //!
-//! - **Persistent storage** (`env.storage().persistent()`): Stores per‑key data that can be archived and restored independently. Each entry is automatically extended on read/write via `extend(env, &key)` using a TTL bump policy.
+//! - **Persistent storage** (`env.storage().persistent()`): Stores per‑key data that can be archived and restored independently. Each entry is automatically extended on read/write via [`extend`] using the shared TTL bump policy.
 //!   - `Anchor`, `Pool`, `Balance`, `Settlement`, `FeesAccrued`, `WaivedFeeVolume`, `AnchorList`, `AssetList`, `FeeWaiver`, `MinLiquidity`, `MaxSettlementAmount`, `AssetFee`
 //!
 //! # TTL Extension
 //!
-//! `extend_instance_ttl` only extends the lifetime of the **instance** bucket and does **not** affect any of the persistent entries. Persistent entries rely on their own per‑key `extend` calls, which are triggered by read/write traffic.
+//! The single source of truth for both policies is the pair of constants
+//! [`LIFETIME_THRESHOLD`] / [`BUMP_AMOUNT`]. Persistent entries are bumped
+//! per-key through [`extend`]; the instance is bumped through
+//! [`bump_instance`] (which is also what the public `extend_instance_ttl`
+//! entrypoint calls). An entry is only bumped when it is actually present or
+//! is being written — `extend_ttl` on a key that was never written would trap,
+//! so getters that return a default for an absent key guard the bump behind an
+//! existence check.
 //!
-//! This separation ensures that critical contract configuration remains available even if the contract code entry is archived, while large per‑asset data can be reclaimed when inactive.
+//! This coverage model makes it impossible for new code to silently forget a
+//! TTL bump: there is no raw `env.storage().persistent()/instance()` call in
+//! business logic, and every accessor in this module owns its own bump. A
+//! getter that returns a default for an absent key must still extend when the
+//! key *is* present; tests in `test.rs` lock that in for every accessor.
 
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
@@ -91,40 +104,62 @@ fn extend(env: &Env, key: &DataKey) {
         .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
 
-/// Extends the TTL of the contract instance and code, using the same
-/// threshold/bump policy as individual persistent entries, so the contract
-/// itself does not expire during a long period of inactivity.
-pub fn extend_instance_ttl(env: &Env) {
+/// Refreshes the TTL of the contract instance (and its Wasm code entry) using
+/// the shared threshold/bump policy.
+///
+/// The instance is a single archive unit: all of `Admin`, `Paused`, `FeeBps`,
+/// `SettlementCount`, etc. live inside it, so every instance accessor calls
+/// this. Bumping is a no-op at the host level while the TTL is still above
+/// [`LIFETIME_THRESHOLD`], so calling it on hot paths costs nothing when the
+/// instance is fresh and prevents archival on cold paths.
+fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
 
+/// Extends the TTL of the contract instance and code, using the same
+/// threshold/bump policy as individual persistent entries, so the contract
+/// itself does not expire during a long period of inactivity.
+///
+/// This is the manual, permissioned entrypoint (admin/operator); every
+/// instance accessor also calls [`bump_instance`] automatically, so this is
+/// primarily useful to proactively refresh an instance that has seen no
+/// traffic at all.
+pub fn extend_instance_ttl(env: &Env) {
+    bump_instance(env);
+}
+
 /// Returns `true` once an administrator has been set.
 pub fn has_admin(env: &Env) -> bool {
+    bump_instance(env);
     env.storage().instance().has(&DataKey::Admin)
 }
 
 /// Reads the administrator address. Panics if uninitialized — callers should
 /// guard with [`has_admin`] first.
 pub fn get_admin(env: &Env) -> Address {
+    bump_instance(env);
     env.storage().instance().get(&DataKey::Admin).unwrap()
 }
 
 /// Persists the administrator address in instance storage.
 pub fn set_admin(env: &Env, admin: &Address) {
     env.storage().instance().set(&DataKey::Admin, admin);
+    bump_instance(env);
 }
 
 /// Returns `true` if an admin transfer has been proposed and not yet
 /// accepted or overwritten.
 pub fn has_pending_admin(env: &Env) -> bool {
+    bump_instance(env);
     env.storage().instance().has(&DataKey::PendingAdmin)
 }
 
 /// Reads the proposed next administrator. Panics if none is pending —
 /// callers should guard with [`has_pending_admin`] first.
 pub fn get_pending_admin(env: &Env) -> Address {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::PendingAdmin)
@@ -136,36 +171,43 @@ pub fn set_pending_admin(env: &Env, candidate: &Address) {
     env.storage()
         .instance()
         .set(&DataKey::PendingAdmin, candidate);
+    bump_instance(env);
 }
 
 /// Clears any proposed admin transfer.
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+    bump_instance(env);
 }
 
 /// Returns `true` once an operator has been appointed.
 pub fn has_operator(env: &Env) -> bool {
+    bump_instance(env);
     env.storage().instance().has(&DataKey::Operator)
 }
 
 /// Reads the operator address. Panics if none is appointed — callers should
 /// guard with [`has_operator`] first.
 pub fn get_operator(env: &Env) -> Address {
+    bump_instance(env);
     env.storage().instance().get(&DataKey::Operator).unwrap()
 }
 
 /// Persists the operator address in instance storage.
 pub fn set_operator(env: &Env, operator: &Address) {
     env.storage().instance().set(&DataKey::Operator, operator);
+    bump_instance(env);
 }
 
 /// Removes the operator address from instance storage.
 pub fn clear_operator(env: &Env) {
     env.storage().instance().remove(&DataKey::Operator);
+    bump_instance(env);
 }
 
 /// Returns `true` if the contract is currently paused.
 pub fn is_paused(env: &Env) -> bool {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::Paused)
@@ -175,16 +217,19 @@ pub fn is_paused(env: &Env) -> bool {
 /// Sets the paused flag.
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&DataKey::Paused, &paused);
+    bump_instance(env);
 }
 
 /// Reads the protocol fee in basis points (defaults to zero if unset).
 pub fn get_fee_bps(env: &Env) -> u32 {
+    bump_instance(env);
     env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
 }
 
 /// Persists the protocol fee in basis points.
 pub fn set_fee_bps(env: &Env, bps: u32) {
     env.storage().instance().set(&DataKey::FeeBps, &bps);
+    bump_instance(env);
 }
 
 /// Returns `true` if `anchor` has been registered.
@@ -295,10 +340,17 @@ pub fn get_pool(env: &Env, asset: &Symbol) -> Pool {
 }
 
 /// Returns `true` if a pool entry exists for `asset`.
+///
+/// Extends the entry's TTL when present so the `pool_exists` / `pool` read
+/// path, which never goes through a setter, cannot let an active pool archive
+/// between liquidity events. Mirrors the existence-guarded bump used by
+/// [`is_fee_waived`] and the other "set once, read often" getters.
 pub fn has_pool(env: &Env, asset: &Symbol) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::Pool(asset.clone()))
+    let key = DataKey::Pool(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
+    env.storage().persistent().has(&key)
 }
 
 /// Persists `pool` for `asset`.
@@ -309,8 +361,19 @@ pub fn set_pool(env: &Env, asset: &Symbol, pool: &Pool) {
 }
 
 /// Reads a provider's balance in `asset` (zero if none).
+///
+/// Extends the entry's TTL on a successful read. Balances are written on
+/// provide/withdraw but read far more often — `balance`, `withdraw_*`,
+/// `provider_share_bps`, `anchor_balances`, and the provide/withdraw internals
+/// all go through here — so a balance that sits un-mutated while a settlement
+/// is pending (an ordinary lifecycle) must not archive out from under the
+/// position it backs. The `.has` guard leaves never-funded providers returning
+/// `0` without attempting to extend an absent key.
 pub fn get_balance(env: &Env, provider: &Address, asset: &Symbol) -> i128 {
     let key = DataKey::Balance(provider.clone(), asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
@@ -323,6 +386,7 @@ pub fn set_balance(env: &Env, provider: &Address, asset: &Symbol, amount: i128) 
 
 /// Reads the settlement id counter (zero before the first settlement).
 pub fn get_settlement_count(env: &Env) -> u64 {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::SettlementCount)
@@ -334,6 +398,7 @@ pub fn set_settlement_count(env: &Env, count: u64) {
     env.storage()
         .instance()
         .set(&DataKey::SettlementCount, &count);
+    bump_instance(env);
 }
 
 /// Reads a settlement by id, if it exists.
@@ -379,6 +444,7 @@ pub fn set_fee_waiver(env: &Env, anchor: &Address, waived: bool) {
 /// Returns `true` if the settlement expiry window has been explicitly
 /// configured, including an explicit zero value that disables expiry.
 pub fn has_settlement_expiry_ledgers(env: &Env) -> bool {
+    bump_instance(env);
     env.storage()
         .instance()
         .has(&DataKey::SettlementExpiryLedgers)
@@ -387,6 +453,7 @@ pub fn has_settlement_expiry_ledgers(env: &Env) -> bool {
 /// Reads the settlement expiry window in ledgers (zero if never configured,
 /// meaning settlements never expire).
 pub fn get_settlement_expiry_ledgers(env: &Env) -> u32 {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::SettlementExpiryLedgers)
@@ -398,6 +465,7 @@ pub fn set_settlement_expiry_ledgers(env: &Env, ledgers: u32) {
     env.storage()
         .instance()
         .set(&DataKey::SettlementExpiryLedgers, &ledgers);
+    bump_instance(env);
 }
 
 /// Reads the minimum liquidity floor configured for `asset` (zero, meaning
@@ -419,10 +487,20 @@ pub fn get_min_liquidity(env: &Env, asset: &Symbol) -> i128 {
 /// Returns `true` if a minimum liquidity floor has ever been configured for
 /// `asset`, including an explicit zero floor that intentionally disables the
 /// withdrawal check.
+///
+/// When present, the entry's TTL is extended just like [`has_pool`] and
+/// [`has_max_settlement_amount`], so any future caller that relies on this
+/// existence probe keeps the risk parameter alive. It is not currently wired to
+/// an entrypoint (the value getter [`get_min_liquidity`] serves the existing
+/// callers), but is kept as part of the storage accessor surface and is covered
+/// by a TTL test.
+#[allow(dead_code)]
 pub fn has_min_liquidity(env: &Env, asset: &Symbol) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::MinLiquidity(asset.clone()))
+    let key = DataKey::MinLiquidity(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
+    env.storage().persistent().has(&key)
 }
 
 /// Persists the minimum liquidity floor for `asset`.
@@ -537,8 +615,18 @@ pub fn set_fees_accrued(env: &Env, asset: &Symbol, amount: i128) {
 }
 
 /// Reads the forgone protocol fee volume for `asset`.
+///
+/// Extends the entry's TTL on a successful read. The volume is written only
+/// when a waived anchor opens a settlement, but is read on the reporting path
+/// (`waived_fee_volume`, `total_waived_fee_volume`), so a long gap between
+/// waived settlements could otherwise let the entry archive and zero out the
+/// reported forgone revenue. The `.has` guard leaves assets with no waiver
+/// activity returning `0` without touching an absent key.
 pub fn get_waived_fee_volume(env: &Env, asset: &Symbol) -> i128 {
     let key = DataKey::WaivedFeeVolume(asset.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
     env.storage().persistent().get(&key).unwrap_or(0)
 }
 
