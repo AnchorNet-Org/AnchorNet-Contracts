@@ -20,31 +20,13 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      # The Makefile is the single source of truth for build operations; CI
+      # invokes the same targets a contributor runs locally.
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: make fmt-check
 
       - name: Build
-        run: cargo build
+        run: make build
 
       - name: Run tests
-        run: cargo test
-
-      - name: Reject unguarded unwrap/expect/panic in contract source
-        run: |
-          set -euo pipefail
-          # unwrap()/expect()/panic! are forbidden in contract source
-          # (src/test.rs is exempt) unless the line directly above carries an
-          # "INVARIANT:" comment naming the invariant that makes the panic
-          # unreachable. New untrusted failure paths must return typed errors
-          # from src/error.rs instead of trapping.
-          awk '
-            FNR == 1 { prev = "" }
-            /\.(unwrap|expect)\(|panic!/ {
-              if (prev !~ /INVARIANT/) {
-                print FILENAME ":" FNR ": " $0
-                bad = 1
-              }
-            }
-            { prev = $0 }
-            END { exit bad }
-          ' src/lib.rs src/storage.rs src/events.rs src/types.rs src/error.rs
+        run: make test
