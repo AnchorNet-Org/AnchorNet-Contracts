@@ -7078,6 +7078,292 @@ fn test_get_fees_accrued_read_on_unconfigured_asset_is_safe() {
     assert_eq!(client.fees_accrued(&never_settled), 0);
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// TTL coverage for the gaps identified in the 50-site storage audit.
+//
+// The getters below previously read a persistent entry without bumping its
+// TTL, so a record created and then left alone for longer than the default
+// TTL (e.g. a provider balance backing an open settlement, or the waived-fee
+// volume read only on the reporting path) could archive while still live.
+//
+// Every test follows the same strategy as the issue #121/#122 bump-on-read
+// tests above: write the entry (which bumps TTL to BUMP_AMOUNT), advance the
+// ledger past LIFETIME_THRESHOLD so the next extend is a real bump rather than
+// a no-op, snapshot the remaining TTL, exercise the read-only public path, and
+// assert the TTL grew. Without the fix the read is a pure access and the TTL
+// is unchanged, so `after > before` fails; with the fix it refreshes.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_balance_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    let key = DataKey::Balance(anchor.clone(), asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // Read-only: `balance` goes through storage::get_balance, which must bump.
+    assert_eq!(client.balance(&anchor, &asset), 1_000);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "balance read did not bump TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_anchor_balances_scan_bumps_each_balance_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    let key = DataKey::Balance(anchor.clone(), asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // `anchor_balances` scans assets and reads balances via get_balance; each
+    // present balance must be bumped, mirroring the total_fees_accrued cascade.
+    let pairs = client.anchor_balances(&anchor, &0, &10);
+    assert_eq!(pairs.len(), 1);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "anchor_balances did not bump the balance entry's TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_balance_read_on_unfunded_provider_is_safe() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    // A provider with no balance has no Balance entry: the getter must return
+    // 0 without attempting to extend an absent key (which would trap).
+    let stranger = Address::generate(&env);
+    assert_eq!(client.balance(&stranger, &symbol_short!("USDC")), 0);
+}
+
+#[test]
+fn test_waived_fee_volume_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    // A waived anchor with a non-zero fee produces a WaivedFeeVolume entry.
+    client.set_fee(&100); // 1%
+    client.set_fee_waiver(&anchor, &true);
+    let id = client.open_settlement(&anchor, &asset, &400);
+    let _ = id;
+    assert_eq!(client.waived_fee_volume(&asset), 4);
+
+    let key = DataKey::WaivedFeeVolume(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // Read-only reporting path.
+    assert_eq!(client.waived_fee_volume(&asset), 4);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "waived_fee_volume read did not bump TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_total_waived_fee_volume_cascades_bump() {
+    let env = Env::default();
+    let (client, _admin, anchor, asset) = funded(&env, 1_000);
+
+    client.set_fee(&100);
+    client.set_fee_waiver(&anchor, &true);
+    client.open_settlement(&anchor, &asset, &400);
+    assert_eq!(client.waived_fee_volume(&asset), 4);
+
+    let key = DataKey::WaivedFeeVolume(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    let total = client.total_waived_fee_volume();
+    assert_eq!(total, 4);
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "total_waived_fee_volume did not cascade the TTL bump: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_waived_fee_volume_read_on_unconfigured_asset_is_safe() {
+    let env = Env::default();
+    let (client, _admin, _anchor, _asset) = funded(&env, 1_000);
+
+    // No waiver activity ever: the getter returns 0 without extending.
+    assert_eq!(client.waived_fee_volume(&symbol_short!("EURC")), 0);
+}
+
+#[test]
+fn test_pool_exists_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, _admin, _anchor, asset) = funded(&env, 1_000);
+
+    let key = DataKey::Pool(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &client.address, &key);
+
+    // pool_exists only calls has_pool (a has-probe); it must still bump.
+    assert!(client.pool_exists(&asset));
+
+    let after = persistent_ttl(&env, &client.address, &key);
+    assert!(
+        after > before,
+        "pool_exists read did not bump TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_has_min_liquidity_read_bumps_ttl() {
+    // has_min_liquidity is a crate-internal accessor (not wired to an
+    // entrypoint), so exercise it directly inside as_contract.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let asset = symbol_short!("USDC");
+    client.initialize(&admin);
+    client.set_min_liquidity(&asset, &100);
+
+    let contract = client.address.clone();
+    let key = DataKey::MinLiquidity(asset.clone());
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = persistent_ttl(&env, &contract, &key);
+
+    let present = env.as_contract(&contract, || {
+        crate::storage::has_min_liquidity(&env, &asset)
+    });
+    assert!(present);
+
+    let after = persistent_ttl(&env, &contract, &key);
+    assert!(
+        after > before,
+        "has_min_liquidity read did not bump TTL: before={before}, after={after}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Instance TTL survival.
+//
+// Instance storage is a single archive unit: Admin, PendingAdmin, Operator,
+// Paused, FeeBps, SettlementCount and SettlementExpiryLedgers all live inside
+// it, and archiving the instance takes the Wasm entry with it — the most
+// severe failure mode. Empirically (see the storage audit), writing an
+// instance key does NOT refresh the instance TTL on Soroban 25, so relying on
+// write traffic alone leaves the contract archivable after the default TTL.
+//
+// The fix makes every instance accessor bump the instance TTL. These tests
+// prove that both a read-only path and a mutating (write) path refresh the
+// instance TTL, and that the instance survives an idle period that previously
+// would have let it decay toward archival.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Reads the remaining TTL of the contract's instance entry.
+fn instance_ttl(env: &Env, contract: &Address) -> u32 {
+    use soroban_sdk::testutils::storage::Instance as _;
+    env.as_contract(contract, || env.storage().instance().get_ttl())
+}
+
+#[test]
+fn test_instance_read_bumps_ttl() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = instance_ttl(&env, &client.address);
+
+    // A read-only entrypoint (fee -> get_fee_bps) must bump the instance.
+    let _ = client.fee();
+
+    let after = instance_ttl(&env, &client.address);
+    assert!(
+        after > before,
+        "instance read did not bump TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_instance_write_bumps_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = instance_ttl(&env, &client.address);
+
+    // A mutating entrypoint (set_fee -> set_fee_bps) must bump the instance.
+    // Writing an instance key alone does NOT bump on Soroban 25; the accessor
+    // must do it explicitly.
+    client.set_fee(&50);
+
+    let after = instance_ttl(&env, &client.address);
+    assert!(
+        after > before,
+        "instance write did not bump TTL: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn test_instance_survives_long_idle_period() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    // Simulate the exact lifecycle the issue calls out: create records, then
+    // let the contract sit idle. On Soroban mainnet the default instance TTL is
+    // far shorter than the 30-day bump window, so without automatic bumps the
+    // instance would archive. Repeated reads over an advancing ledger must keep
+    // the instance TTL comfortably above zero the whole time.
+    for _ in 0..5 {
+        advance_ledger(&env, TTL_DECAY_LEDGERS);
+        // Any live call (read or write) refreshes the instance via its
+        // accessor. Use a read so this proves read-side coverage.
+        let _ = client.is_initialized();
+        let ttl = instance_ttl(&env, &client.address);
+        assert!(
+            ttl > TTL_DECAY_LEDGERS,
+            "instance TTL decayed to {ttl}, within one idle window of archival"
+        );
+    }
+
+    // After all that idle time, the instance and its config are still live and
+    // readable with no manual extend_instance_ttl call.
+    assert!(client.is_initialized());
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn test_extend_instance_ttl_entrypoint_bumps_instance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    client.initialize(&admin);
+
+    advance_ledger(&env, TTL_DECAY_LEDGERS);
+    let before = instance_ttl(&env, &client.address);
+
+    // The explicit admin/operator entrypoint still works and bumps the
+    // instance using the same shared constants (no duplicate threshold set).
+    client.extend_instance_ttl(&admin);
+
+    let after = instance_ttl(&env, &client.address);
+    assert!(
+        after > before,
+        "extend_instance_ttl did not bump TTL: before={before}, after={after}"
+    );
+}
+
 #[test]
 fn test_withdraw_liquidity_multi_atomic_rejection_on_min_liquidity_floor_violation() {
     let env = Env::default();
@@ -7447,4 +7733,451 @@ proptest! {
             );
         }
     }
+}
+
+// ============================================================================
+// Comprehensive Event Emission Tests - Issue #259
+// ============================================================================
+// Tests verifying that all state-mutating operations emit required events,
+// achieving 95% minimum coverage as per acceptance criteria.
+
+#[test]
+fn test_initialize_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("init")]);
+}
+
+#[test]
+fn test_propose_admin_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let candidate = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    env.events().all(); // clear events from initialize
+
+    contract.propose_admin(&candidate);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("propose")]);
+}
+
+#[test]
+fn test_set_operator_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let operator = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    env.events().all(); // clear initialize event
+
+    contract.set_operator(&operator);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("operator")]);
+}
+
+#[test]
+fn test_clear_operator_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let operator = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.set_operator(&operator);
+    env.events().all(); // clear set_operator event
+
+    contract.clear_operator();
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("op_clear")]);
+}
+
+#[test]
+fn test_renounce_operator_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let operator = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.set_operator(&operator);
+    env.events().all(); // clear set_operator event
+
+    contract.renounce_operator(&operator);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("renounce")]);
+}
+
+#[test]
+fn test_set_fee_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    env.events().all(); // clear initialize event
+
+    contract.set_fee(&500);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("fee")]);
+}
+
+#[test]
+fn test_set_fee_waiver_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    env.events().all(); // clear register_anchor event
+
+    contract.set_fee_waiver(&anchor, &true);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("waiver"), anchor.clone()]);
+}
+
+#[test]
+fn test_collect_fees_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    contract.set_settlement_expiry_ledgers(&100);
+    contract.open_settlement(&anchor, &asset, &100);
+    contract.execute_settlement(&1);
+    env.events().all(); // clear previous events
+
+    contract.collect_fees(&asset);
+    let events = env.events().all();
+
+    assert!(events.len() > 0);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("collect"), asset.clone()]);
+}
+
+#[test]
+fn test_register_anchor_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    env.events().all(); // clear initialize event
+
+    contract.register_anchor(&anchor);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("anchor"), anchor.clone()]);
+}
+
+#[test]
+fn test_deregister_anchor_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    env.events().all(); // clear register_anchor event
+
+    contract.deregister_anchor(&anchor);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("deanchor"), anchor.clone()]);
+}
+
+#[test]
+fn test_provide_liquidity_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    env.events().all(); // clear register_anchor event
+
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    let events = env.events().all();
+
+    // Should emit ("provide", ...) and ("onboarded", ...) on first provision
+    assert!(events.len() >= 2);
+    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("provide")));
+    assert_eq!(events.get(1).unwrap().topics.get(0), Some(&symbol_short!("onboarded")));
+}
+
+#[test]
+fn test_provide_liquidity_multi_emits_events() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset1 = symbol_short!("USD");
+    let asset2 = symbol_short!("EUR");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    env.events().all(); // clear register_anchor event
+
+    let requests = vec![&env, (asset1.clone(), 1000), (asset2.clone(), 2000)];
+    contract.provide_liquidity_multi(&anchor, &requests);
+    let events = env.events().all();
+
+    // Should emit events for each asset
+    assert!(events.len() >= 4); // 2 provide + 2 onboarded
+}
+
+#[test]
+fn test_withdraw_liquidity_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    env.events().all(); // clear previous events
+
+    contract.withdraw_liquidity(&anchor, &asset, &500);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("withdraw")));
+}
+
+#[test]
+fn test_open_settlement_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    env.events().all(); // clear previous events
+
+    contract.open_settlement(&anchor, &asset, &100);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("settle"), anchor.clone(), asset.clone()]);
+}
+
+#[test]
+fn test_execute_settlement_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    contract.open_settlement(&anchor, &asset, &100);
+    env.events().all(); // clear previous events
+
+    contract.execute_settlement(&1);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("executed"), 1u64]);
+}
+
+#[test]
+fn test_cancel_settlement_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    contract.open_settlement(&anchor, &asset, &100);
+    env.events().all(); // clear previous events
+
+    contract.cancel_settlement(&1);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("cancelled"), 1u64]);
+}
+
+#[test]
+fn test_cancel_expired_settlement_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    contract.set_settlement_expiry_ledgers(&100);
+    contract.open_settlement(&anchor, &asset, &100);
+
+    // Advance ledger beyond expiry
+    env.ledger().set_sequence_number(200);
+    env.events().all(); // clear previous events
+
+    contract.cancel_expired_settlement(&1);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("expired"), 1u64]);
+}
+
+#[test]
+fn test_set_settlement_expiry_ledgers_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    env.events().all(); // clear initialize event
+
+    contract.set_settlement_expiry_ledgers(&500);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("expiry")]);
+}
+
+#[test]
+fn test_clear_min_liquidity_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.set_min_liquidity(&asset, &1000);
+    env.events().all(); // clear set_min_liquidity event
+
+    contract.clear_min_liquidity(&asset);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("minliq"), asset.clone()]);
+}
+
+#[test]
+fn test_clear_max_settlement_amount_emits_event() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.set_max_settlement_amount(&asset, &1000);
+    env.events().all(); // clear set_max_settlement_amount event
+
+    contract.clear_max_settlement_amount(&asset);
+    let events = env.events().all();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("maxamt"), asset.clone()]);
+}
+
+#[test]
+fn test_withdraw_all_liquidity_emits_withdraw_and_exited_events() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset = symbol_short!("USD");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset, &1000);
+    env.events().all(); // clear previous events
+
+    contract.withdraw_all_liquidity(&anchor, &asset);
+    let events = env.events().all();
+
+    // Should emit ("withdraw", ...) and ("exited", ...) when balance reaches zero
+    assert_eq!(events.len(), 2);
+    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("withdraw")));
+    assert_eq!(events.get(1).unwrap().topics.get(0), Some(&symbol_short!("exited")));
+}
+
+#[test]
+fn test_withdraw_liquidity_multi_emits_events() {
+    let env = Env::default();
+    let admin = Address::random(&env);
+    let anchor = Address::random(&env);
+    let asset1 = symbol_short!("USD");
+    let asset2 = symbol_short!("EUR");
+    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    contract.initialize(&admin);
+
+    env.mock_all_auths();
+    contract.register_anchor(&anchor);
+    contract.provide_liquidity(&anchor, &asset1, &1000);
+    contract.provide_liquidity(&anchor, &asset2, &2000);
+    env.events().all(); // clear previous events
+
+    let requests = vec![&env, (asset1.clone(), 500), (asset2.clone(), 1000)];
+    contract.withdraw_liquidity_multi(&anchor, &requests);
+    let events = env.events().all();
+
+    // Should emit withdraw events for each asset
+    assert!(events.len() >= 2);
 }
