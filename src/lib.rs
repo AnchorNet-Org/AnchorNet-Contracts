@@ -58,12 +58,10 @@ impl AnchornetContract {
         storage::has_admin(&env)
     }
 
-    /// Returns the current administrator address.
+    /// Returns the current administrator address, or
+    /// [`Error::NotInitialized`] if the contract has not been initialized.
     pub fn admin(env: Env) -> Result<Address, Error> {
-        if !storage::has_admin(&env) {
-            return Err(Error::NotInitialized);
-        }
-        Ok(storage::get_admin(&env))
+        storage::get_admin(&env)
     }
 
     /// Transfers administration to `new_admin`. Requires authorization from the
@@ -107,7 +105,7 @@ impl AnchornetContract {
     /// Regression tests lock in all three phases (see `test.rs`, issue #130).
     pub fn propose_admin(env: Env, candidate: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        if candidate == storage::get_admin(&env) {
+        if candidate == storage::get_admin(&env)? {
             return Err(Error::InvalidAdminCandidate);
         }
         storage::set_pending_admin(&env, &candidate);
@@ -115,23 +113,17 @@ impl AnchornetContract {
         Ok(())
     }
 
-    /// Returns the address proposed to become the next administrator, if
-    /// any.
+    /// Returns the address proposed to become the next administrator, or
+    /// [`Error::NoPendingAdmin`] if no proposal is outstanding.
     pub fn pending_admin(env: Env) -> Result<Address, Error> {
-        if !storage::has_pending_admin(&env) {
-            return Err(Error::NoPendingAdmin);
-        }
-        Ok(storage::get_pending_admin(&env))
+        storage::get_pending_admin(&env)
     }
 
     /// Accepts a pending admin transfer proposed via
     /// [`propose_admin`](Self::propose_admin). Requires authorization from
     /// `candidate`, who must match the proposed address.
     pub fn accept_admin(env: Env, candidate: Address) -> Result<(), Error> {
-        if !storage::has_pending_admin(&env) {
-            return Err(Error::NoPendingAdmin);
-        }
-        if storage::get_pending_admin(&env) != candidate {
+        if storage::get_pending_admin(&env)? != candidate {
             return Err(Error::NotPendingAdmin);
         }
         candidate.require_auth();
@@ -176,10 +168,7 @@ impl AnchornetContract {
     /// [`clear_operator`](Self::clear_operator), so off-chain systems can
     /// distinguish the two removal paths.
     pub fn renounce_operator(env: Env, caller: Address) -> Result<(), Error> {
-        if !storage::has_operator(&env) {
-            return Err(Error::NoOperator);
-        }
-        if caller != storage::get_operator(&env) {
+        if caller != storage::get_operator(&env)? {
             return Err(Error::NotAuthorized);
         }
         caller.require_auth();
@@ -191,15 +180,16 @@ impl AnchornetContract {
     /// Returns the currently appointed operator, or [`Error::NoOperator`] if
     /// none has been appointed.
     pub fn operator(env: Env) -> Result<Address, Error> {
-        if !storage::has_operator(&env) {
-            return Err(Error::NoOperator);
-        }
-        Ok(storage::get_operator(&env))
+        storage::get_operator(&env)
     }
 
     /// Returns `true` if `address` is the currently appointed operator.
     pub fn is_operator(env: Env, address: Address) -> bool {
-        storage::has_operator(&env) && storage::get_operator(&env) == address
+        match storage::get_operator(&env) {
+            Ok(operator) => operator == address,
+            // No operator appointed — no address can be the operator.
+            Err(_) => false,
+        }
     }
 
     /// Pauses the contract, blocking liquidity and settlement mutations.
@@ -367,6 +357,10 @@ impl AnchornetContract {
         let total = list.len();
         let mut idx = start;
         while idx < total && (out.len() as u32) < limit {
+            // `idx` is strictly below `total`, which is this list's length
+            // captured before the loop, and the list is never mutated inside
+            // the loop, so `get(idx)` is always in bounds.
+            // INVARIANT: in-bounds `Vec::get` — `None` is unreachable here.
             let anchor = list.get(idx).unwrap();
             if storage::is_anchor(&env, &anchor) && storage::is_fee_waived(&env, &anchor) {
                 out.push_back(anchor);
@@ -465,6 +459,10 @@ impl AnchornetContract {
         let total = list.len();
         let mut idx = start;
         while idx < total && (out.len() as u32) < limit {
+            // `idx` is strictly below `total`, which is this list's length
+            // captured before the loop, and the list is never mutated inside
+            // the loop, so `get(idx)` is always in bounds.
+            // INVARIANT: in-bounds `Vec::get` — `None` is unreachable here.
             let anchor = list.get(idx).unwrap();
             if storage::is_anchor(&env, &anchor) {
                 out.push_back(anchor);
@@ -968,6 +966,10 @@ impl AnchornetContract {
         let total = list.len();
         let mut idx = start;
         while idx < total && (out.len() as u32) < limit {
+            // `idx` is strictly below `total`, which is this list's length
+            // captured before the loop, and the list is never mutated inside
+            // the loop, so `get(idx)` is always in bounds.
+            // INVARIANT: in-bounds `Vec::get` — `None` is unreachable here.
             out.push_back(list.get(idx).unwrap());
             idx += 1;
         }
@@ -1069,6 +1071,10 @@ impl AnchornetContract {
         let total = assets.len();
         let mut idx = start;
         while idx < total && (out.len() as u32) < limit {
+            // `idx` is strictly below `total`, which is this list's length
+            // captured before the loop, and the list is never mutated inside
+            // the loop, so `get(idx)` is always in bounds.
+            // INVARIANT: in-bounds `Vec::get` — `None` is unreachable here.
             let asset = assets.get(idx).unwrap();
             let balance = storage::get_balance(&env, &provider, &asset);
             if balance != 0 {
@@ -1422,10 +1428,10 @@ impl AnchornetContract {
 impl AnchornetContract {
     /// Requires the call to be authorized by the current administrator.
     fn require_admin(env: &Env) -> Result<(), Error> {
-        if !storage::has_admin(env) {
-            return Err(Error::NotInitialized);
-        }
-        let admin = storage::get_admin(env);
+        // `get_admin` returns `Error::NotInitialized` when the contract has
+        // not been initialized, so authorization is only demanded once an
+        // administrator exists.
+        let admin = storage::get_admin(env)?;
         admin.require_auth();
         Ok(())
     }
@@ -1444,11 +1450,13 @@ impl AnchornetContract {
     /// since Soroban contracts have no implicit "sender" and the two
     /// eligible identities must be told apart before demanding a signature.
     fn require_admin_or_operator(env: &Env, caller: &Address) -> Result<(), Error> {
-        if !storage::has_admin(env) {
-            return Err(Error::NotInitialized);
-        }
-        let is_admin = *caller == storage::get_admin(env);
-        let is_operator = storage::has_operator(env) && *caller == storage::get_operator(env);
+        // `get_admin` returns `Error::NotInitialized` when the contract has
+        // not been initialized, so that state is reported before any
+        // authorization is demanded. The operator side short-circuits on
+        // [`has_operator`], so `get_operator` can only fail when no operator
+        // exists, in which case `is_operator` is already `false`.
+        let is_admin = *caller == storage::get_admin(env)?;
+        let is_operator = storage::has_operator(env) && *caller == storage::get_operator(env)?;
         if !is_admin && !is_operator {
             return Err(Error::NotAuthorized);
         }

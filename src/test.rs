@@ -187,6 +187,17 @@ fn test_initialize_sets_admin() {
 }
 
 #[test]
+fn test_admin_fails_before_initialize() {
+    let env = Env::default();
+    let (client, _admin) = setup(&env);
+
+    // Reading the admin on an uninitialized contract must surface the typed
+    // `NotInitialized` error (via the storage accessor), not a host trap.
+    let err = client.try_admin().err().unwrap().unwrap();
+    assert_eq!(err, Error::NotInitialized);
+}
+
+#[test]
 fn test_initialize_twice_fails() {
     let env = Env::default();
     let (client, admin) = setup(&env);

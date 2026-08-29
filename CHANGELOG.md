@@ -18,6 +18,17 @@ All notable changes to the AnchorNet contracts are documented here.
 
 ### Fixed
 
+- **Errors:** the storage accessors `get_admin`, `get_pending_admin`, and
+  `get_operator` now return typed contract errors (`NotInitialized`,
+  `NoPendingAdmin`, `NoOperator`) when the corresponding entry is missing,
+  instead of trapping with an undecodable host panic. Public entrypoint
+  behavior is unchanged — the same errors, now enforced at the accessor.
+- **Errors:** the four list-pagination `unwrap()`s in `list_anchors`,
+  `list_fee_waived_anchors`, `list_assets`, and `anchor_balances` were
+  audited and annotated as guarded invariants (in-bounds by the loop bound).
+- **CI:** added a guard that rejects new unguarded `unwrap()`/`expect()`/
+  `panic!` sites in contract source.
+
 ### Security
 
 ## [0.9.0]

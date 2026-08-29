@@ -40,6 +40,7 @@
 
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
+use crate::error::Error;
 use crate::types::{AnchorStatus, Pool, Settlement};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -136,11 +137,26 @@ pub fn has_admin(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Admin)
 }
 
+ Seven-`unwrap()`/`panic!`-sites-in-contract-source-bypass-the-typed-error-enum-and-trap-with-opaque-host-errors-#263
+/// Reads the administrator address.
+///
+/// Returns [`Error::NotInitialized`] when no administrator has been stored
+/// yet, so callers can surface a typed, decodable error instead of trapping
+/// on an unguarded `unwrap`. Every public entrypoint that needs the admin
+/// either propagates this error with `?` (see `require_admin`) or treats it
+/// as the contract's uninitialized state.
+pub fn get_admin(env: &Env) -> Result<Address, Error> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)
+
 /// Reads the administrator address. Panics if uninitialized — callers should
 /// guard with [`has_admin`] first.
 pub fn get_admin(env: &Env) -> Address {
     bump_instance(env);
     env.storage().instance().get(&DataKey::Admin).unwrap()
+
 }
 
 /// Persists the administrator address in instance storage.
@@ -148,6 +164,15 @@ pub fn set_admin(env: &Env, admin: &Address) {
     env.storage().instance().set(&DataKey::Admin, admin);
     bump_instance(env);
 }
+
+ Seven-`unwrap()`/`panic!`-sites-in-contract-source-bypass-the-typed-error-enum-and-trap-with-opaque-host-errors-#263
+/// Reads the proposed next administrator.
+///
+/// Returns [`Error::NoPendingAdmin`] when no transfer is pending, so callers
+/// can surface a typed, decodable error instead of trapping on an unguarded
+/// `unwrap`. Every public entrypoint that needs the pending admin propagates
+/// this error with `?`.
+pub fn get_pending_admin(env: &Env) -> Result<Address, Error> {
 
 /// Returns `true` if an admin transfer has been proposed and not yet
 /// accepted or overwritten.
@@ -160,10 +185,11 @@ pub fn has_pending_admin(env: &Env) -> bool {
 /// callers should guard with [`has_pending_admin`] first.
 pub fn get_pending_admin(env: &Env) -> Address {
     bump_instance(env);
+
     env.storage()
         .instance()
         .get(&DataKey::PendingAdmin)
-        .unwrap()
+        .ok_or(Error::NoPendingAdmin)
 }
 
 /// Persists the proposed next administrator.
@@ -186,11 +212,26 @@ pub fn has_operator(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Operator)
 }
 
+ Seven-`unwrap()`/`panic!`-sites-in-contract-source-bypass-the-typed-error-enum-and-trap-with-opaque-host-errors-#263
+/// Reads the operator address.
+///
+/// Returns [`Error::NoOperator`] when no operator has been appointed, so
+/// callers can surface a typed, decodable error instead of trapping on an
+/// unguarded `unwrap`. Every public entrypoint that needs the operator
+/// either propagates this error with `?` or guards with [`has_operator`]
+/// first.
+pub fn get_operator(env: &Env) -> Result<Address, Error> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Operator)
+        .ok_or(Error::NoOperator)
+
 /// Reads the operator address. Panics if none is appointed — callers should
 /// guard with [`has_operator`] first.
 pub fn get_operator(env: &Env) -> Address {
     bump_instance(env);
     env.storage().instance().get(&DataKey::Operator).unwrap()
+
 }
 
 /// Persists the operator address in instance storage.
