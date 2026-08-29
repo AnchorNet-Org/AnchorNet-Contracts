@@ -12,6 +12,12 @@ All notable changes to the AnchorNet contracts are documented here.
 
 ### Changed
 
+- **Build tooling:** the Makefile is now the single source of truth for build,
+  test, and format operations — CI invokes `make fmt-check`, `make build`, and
+  `make test` instead of calling cargo directly, and the README documents the
+  same make targets. Added `rust-toolchain.toml` pinning the stable toolchain
+  so local and CI builds use the same Rust version.
+
 ### Deprecated
 
 ### Removed

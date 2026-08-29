@@ -5,8 +5,10 @@ Overview
 Stack: Rust, Soroban SDK
 Network: Stellar (Soroban)
 Prerequisites
-Rust (stable, with rustfmt)
+Rust (stable, with rustfmt) — pinned via rust-toolchain.toml
+make (GNU Make) — the Makefile is the single source of truth for build operations; CI runs the same targets
 Optional: Soroban CLI for deployment and local testing
+Optional: wasm32-unknown-unknown target for make wasm (rustup target add wasm32-unknown-unknown)
 Setup
 Bash
 
@@ -17,10 +19,10 @@ cd anchornet-contracts
 Install Rust if needed
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-Check formatting, build, and test
-cargo fmt --all -- --check
-cargo build
-cargo test
+Check formatting, build, and test — the same targets CI runs
+make fmt-check
+make build
+make test
 
 text
 
@@ -348,20 +350,30 @@ it without an off-chain registry.
 
 ## Commands
 
+The Makefile is the single source of truth for build operations: CI
+(`.github/workflows/ci.yml`) invokes the same targets you run locally, so a
+command that works locally behaves identically in CI.
+
 | Command | Description |
 |--------|-------------|
-| `cargo build` | Build the contract |
-| `cargo test` | Run unit tests |
-| `cargo fmt --all` | Format code |
-| `cargo fmt --all -- --check` | Check formatting (CI) |
+| `make fmt-check` | Check formatting (`cargo fmt --all -- --check`) — CI runs this |
+| `make build` | Build the contract for native testing — CI runs this |
+| `make test` | Run unit tests — CI runs this |
+| `make fmt` | Format code in place |
+| `make wasm` | Build the optimized wasm artifact for deployment (`cargo build --target wasm32-unknown-unknown --release`); requires `rustup target add wasm32-unknown-unknown` |
+| `make clean` | Remove build artifacts |
+
+The wasm build is intentionally not part of CI yet; wiring it in is tracked
+separately. Until then, `make wasm` is the local way to produce the
+deployment artifact.
 
 ## Contributing
 
 1. Fork the repo and create a branch from `main`.
-2. Make changes; keep formatting with `cargo fmt --all`.
+2. Make changes; keep formatting with `make fmt`.
 3. If modifying public contract functions, parameters, return types, data structures, error codes, or events, review and complete the [`Public API Compatibility Checklist`](docs/PUBLIC_API_CHECKLIST.md).
-4. Run `cargo fmt --all -- --check`, `cargo build`, and `cargo test`.
-5. Open a pull request. CI will run format check, build, and tests.
+4. Run `make fmt-check`, `make build`, and `make test` — the same targets CI runs.
+5. Open a pull request. CI will run the same `make fmt-check`, `make build`, and `make test` targets.
 
 ## License
 
