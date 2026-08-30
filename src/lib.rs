@@ -356,7 +356,7 @@ impl AnchornetContract {
         let list = storage::get_anchor_list(&env);
         let total = list.len();
         let mut idx = start;
-        while idx < total && (out.len() as u32) < limit {
+        while idx < total && out.len() < limit {
             // `idx` is strictly below `total`, which is this list's length
             // captured before the loop, and the list is never mutated inside
             // the loop, so `get(idx)` is always in bounds.
@@ -458,7 +458,7 @@ impl AnchornetContract {
         let list = storage::get_anchor_list(&env);
         let total = list.len();
         let mut idx = start;
-        while idx < total && (out.len() as u32) < limit {
+        while idx < total && out.len() < limit {
             // `idx` is strictly below `total`, which is this list's length
             // captured before the loop, and the list is never mutated inside
             // the loop, so `get(idx)` is always in bounds.
@@ -965,7 +965,7 @@ impl AnchornetContract {
         let list = storage::get_asset_list(&env);
         let total = list.len();
         let mut idx = start;
-        while idx < total && (out.len() as u32) < limit {
+        while idx < total && out.len() < limit {
             // `idx` is strictly below `total`, which is this list's length
             // captured before the loop, and the list is never mutated inside
             // the loop, so `get(idx)` is always in bounds.
@@ -1070,7 +1070,7 @@ impl AnchornetContract {
         let assets = storage::get_asset_list(&env);
         let total = assets.len();
         let mut idx = start;
-        while idx < total && (out.len() as u32) < limit {
+        while idx < total && out.len() < limit {
             // `idx` is strictly below `total`, which is this list's length
             // captured before the loop, and the list is never mutated inside
             // the loop, so `get(idx)` is always in bounds.
@@ -1140,7 +1140,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 out.push_back(settlement);
             }
@@ -1161,7 +1161,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.anchor == anchor {
                     out.push_back(settlement);
@@ -1184,7 +1184,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.asset == asset {
                     out.push_back(settlement);
@@ -1208,7 +1208,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.anchor == anchor && settlement.asset == asset {
                     out.push_back(settlement);
@@ -1248,7 +1248,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.anchor == anchor && settlement.status == status {
                     out.push_back(settlement);
@@ -1275,7 +1275,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.status == status {
                     out.push_back(settlement);
@@ -1299,7 +1299,7 @@ impl AnchornetContract {
         let mut out = Vec::new(&env);
         let count = storage::get_settlement_count(&env);
         let mut id = if start == 0 { 1 } else { start };
-        while id <= count && (out.len() as u32) < limit {
+        while id <= count && out.len() < limit {
             if let Some(settlement) = storage::get_settlement(&env, id) {
                 if settlement.opened_at >= ledger {
                     out.push_back(settlement);
