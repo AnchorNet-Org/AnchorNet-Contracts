@@ -19,6 +19,11 @@
 //! (`test_withdraw_event_parity` in `test.rs`) so that any future refactor
 //! that would break the contract is caught immediately.
 
+// Soroban SDK 25.3 deprecates `Events::publish` in favor of `#[contractevent]`.
+// Keep the established event wire format for this compatibility-sensitive
+// contract; migrating event schemas is a separate, behavioral change.
+#![allow(deprecated)]
+
 use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
 /// Emitted once when the contract is initialized. Topics: `("init",)`.

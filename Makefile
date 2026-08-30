@@ -3,7 +3,7 @@
 # made here applies identically locally and in CI. Keep the recipes in sync
 # with the README's Commands section. Each recipe is a single command line,
 # so a failing command makes make abort and the failure propagates to CI.
-.PHONY: build test fmt fmt-check wasm clean
+.PHONY: build test clippy fmt fmt-check wasm clean
 
 # Build the contract for native testing.
 build:
@@ -12,6 +12,12 @@ build:
 # Run the unit test suite.
 test:
 	cargo test
+
+# Lint production contract code with warnings promoted to errors. Test-target
+# linting remains a separate migration because the repository's checked-in
+# tests currently target an older Soroban test API.
+clippy:
+	cargo clippy --lib -- -D warnings
 
 # Format the code in place.
 fmt:

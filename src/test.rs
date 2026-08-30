@@ -7745,12 +7745,16 @@ proptest! {
 fn test_initialize_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     let events = env.events().all();
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("init")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("init")]
+    );
 }
 
 #[test]
@@ -7758,7 +7762,8 @@ fn test_propose_admin_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let candidate = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7768,7 +7773,10 @@ fn test_propose_admin_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("propose")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("propose")]
+    );
 }
 
 #[test]
@@ -7776,7 +7784,8 @@ fn test_set_operator_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let operator = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7786,7 +7795,10 @@ fn test_set_operator_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("operator")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("operator")]
+    );
 }
 
 #[test]
@@ -7794,7 +7806,8 @@ fn test_clear_operator_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let operator = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7805,7 +7818,10 @@ fn test_clear_operator_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("op_clear")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("op_clear")]
+    );
 }
 
 #[test]
@@ -7813,7 +7829,8 @@ fn test_renounce_operator_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let operator = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7824,14 +7841,18 @@ fn test_renounce_operator_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("renounce")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("renounce")]
+    );
 }
 
 #[test]
 fn test_set_fee_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7841,7 +7862,10 @@ fn test_set_fee_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("fee")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("fee")]
+    );
 }
 
 #[test]
@@ -7849,7 +7873,8 @@ fn test_set_fee_waiver_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7860,7 +7885,10 @@ fn test_set_fee_waiver_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("waiver"), anchor.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("waiver"), anchor.clone()]
+    );
 }
 
 #[test]
@@ -7869,7 +7897,8 @@ fn test_collect_fees_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7884,7 +7913,10 @@ fn test_collect_fees_emits_event() {
     let events = env.events().all();
 
     assert!(events.len() > 0);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("collect"), asset.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("collect"), asset.clone()]
+    );
 }
 
 #[test]
@@ -7892,7 +7924,8 @@ fn test_register_anchor_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7902,7 +7935,10 @@ fn test_register_anchor_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("anchor"), anchor.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("anchor"), anchor.clone()]
+    );
 }
 
 #[test]
@@ -7910,7 +7946,8 @@ fn test_deregister_anchor_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7921,7 +7958,10 @@ fn test_deregister_anchor_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("deanchor"), anchor.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("deanchor"), anchor.clone()]
+    );
 }
 
 #[test]
@@ -7930,7 +7970,8 @@ fn test_provide_liquidity_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7942,8 +7983,14 @@ fn test_provide_liquidity_emits_event() {
 
     // Should emit ("provide", ...) and ("onboarded", ...) on first provision
     assert!(events.len() >= 2);
-    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("provide")));
-    assert_eq!(events.get(1).unwrap().topics.get(0), Some(&symbol_short!("onboarded")));
+    assert_eq!(
+        events.get(0).unwrap().topics.get(0),
+        Some(&symbol_short!("provide"))
+    );
+    assert_eq!(
+        events.get(1).unwrap().topics.get(0),
+        Some(&symbol_short!("onboarded"))
+    );
 }
 
 #[test]
@@ -7953,7 +8000,8 @@ fn test_provide_liquidity_multi_emits_events() {
     let anchor = Address::random(&env);
     let asset1 = symbol_short!("USD");
     let asset2 = symbol_short!("EUR");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7974,7 +8022,8 @@ fn test_withdraw_liquidity_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -7986,7 +8035,10 @@ fn test_withdraw_liquidity_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("withdraw")));
+    assert_eq!(
+        events.get(0).unwrap().topics.get(0),
+        Some(&symbol_short!("withdraw"))
+    );
 }
 
 #[test]
@@ -7995,7 +8047,8 @@ fn test_open_settlement_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8007,7 +8060,15 @@ fn test_open_settlement_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("settle"), anchor.clone(), asset.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![
+            &env,
+            &symbol_short!("settle"),
+            anchor.clone(),
+            asset.clone()
+        ]
+    );
 }
 
 #[test]
@@ -8016,7 +8077,8 @@ fn test_execute_settlement_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8029,7 +8091,10 @@ fn test_execute_settlement_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("executed"), 1u64]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("executed"), 1u64]
+    );
 }
 
 #[test]
@@ -8038,7 +8103,8 @@ fn test_cancel_settlement_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8051,7 +8117,10 @@ fn test_cancel_settlement_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("cancelled"), 1u64]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("cancelled"), 1u64]
+    );
 }
 
 #[test]
@@ -8060,7 +8129,8 @@ fn test_cancel_expired_settlement_emits_event() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8077,14 +8147,18 @@ fn test_cancel_expired_settlement_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("expired"), 1u64]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("expired"), 1u64]
+    );
 }
 
 #[test]
 fn test_set_settlement_expiry_ledgers_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8094,7 +8168,10 @@ fn test_set_settlement_expiry_ledgers_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("expiry")]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("expiry")]
+    );
 }
 
 #[test]
@@ -8102,7 +8179,8 @@ fn test_clear_min_liquidity_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8113,7 +8191,10 @@ fn test_clear_min_liquidity_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("minliq"), asset.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("minliq"), asset.clone()]
+    );
 }
 
 #[test]
@@ -8121,7 +8202,8 @@ fn test_clear_max_settlement_amount_emits_event() {
     let env = Env::default();
     let admin = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8132,7 +8214,10 @@ fn test_clear_max_settlement_amount_emits_event() {
     let events = env.events().all();
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events.get(0).unwrap().topics, vec![&env, &symbol_short!("maxamt"), asset.clone()]);
+    assert_eq!(
+        events.get(0).unwrap().topics,
+        vec![&env, &symbol_short!("maxamt"), asset.clone()]
+    );
 }
 
 #[test]
@@ -8141,7 +8226,8 @@ fn test_withdraw_all_liquidity_emits_withdraw_and_exited_events() {
     let admin = Address::random(&env);
     let anchor = Address::random(&env);
     let asset = symbol_short!("USD");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();
@@ -8154,8 +8240,14 @@ fn test_withdraw_all_liquidity_emits_withdraw_and_exited_events() {
 
     // Should emit ("withdraw", ...) and ("exited", ...) when balance reaches zero
     assert_eq!(events.len(), 2);
-    assert_eq!(events.get(0).unwrap().topics.get(0), Some(&symbol_short!("withdraw")));
-    assert_eq!(events.get(1).unwrap().topics.get(0), Some(&symbol_short!("exited")));
+    assert_eq!(
+        events.get(0).unwrap().topics.get(0),
+        Some(&symbol_short!("withdraw"))
+    );
+    assert_eq!(
+        events.get(1).unwrap().topics.get(0),
+        Some(&symbol_short!("exited"))
+    );
 }
 
 #[test]
@@ -8165,7 +8257,8 @@ fn test_withdraw_liquidity_multi_emits_events() {
     let anchor = Address::random(&env);
     let asset1 = symbol_short!("USD");
     let asset2 = symbol_short!("EUR");
-    let contract = AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
+    let contract =
+        AnchornetContractClient::new(&env, &env.register_contract(None, AnchornetContract));
     contract.initialize(&admin);
 
     env.mock_all_auths();

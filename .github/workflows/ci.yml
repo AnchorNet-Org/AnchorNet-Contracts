@@ -15,7 +15,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -24,6 +24,9 @@ jobs:
       # invokes the same targets a contributor runs locally.
       - name: Check formatting
         run: make fmt-check
+
+      - name: Clippy (production code)
+        run: make clippy
 
       - name: Build
         run: make build
