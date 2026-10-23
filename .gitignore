@@ -1,4 +1,7 @@
 /target/
 **/*.rs.bk
+temp_auto_push.bat
 .env
 .DS_Store
+.gitignore
+branch_structure.json
