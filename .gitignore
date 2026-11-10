@@ -1,4 +1,5 @@
 /target/
 **/*.rs.bk
-.env
 .DS_Store
+config.bat
+node_modules
